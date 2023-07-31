@@ -1,17 +1,6 @@
-#[allow(unused_imports)]
-use tracing::{info, debug, error, warn, trace};
 use eventsource_client::{ClientBuilder, Error, Event};
+#[allow(unused_imports)]
+use tracing::{debug, error, info, trace, warn};
 mod credential;
 mod messages;
-
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-       assert!(true)
-    }
-}
+mod sse_codec;

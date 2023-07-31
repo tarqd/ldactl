@@ -13,14 +13,7 @@ path = "src/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio-util = { version = "0.7.8", features = [
-    "codec",
-    "futures-io",
-    "futures-util",
-    "io",
-    "io-util",
-    "tracing",
-] }
+tokio-util = { version = "0.7.8", features = ["codec", "futures-io", "futures-util", "io", "io-util", "tracing"] }
 anyhow = "1.0.72"
 eventsource-client = "0.11.0"
 pretty_env_logger = "0.5.0"
@@ -44,4 +37,5 @@ futures = "0.3.28"
 log = "0.4.19"
 pin-project = "1.1.2"
 miette = { version = "5.10.0", features = ["fancy", "serde"] }
-hyper = "0.14.27"
+reqwest = { version = "0.11.18", features = ["stream"] }
+bytes = "1.4.0"
