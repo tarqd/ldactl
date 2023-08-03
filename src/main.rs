@@ -35,6 +35,8 @@ type ExpirableSDKKey = Expirable<ServerSideKey>;
 type ExpiringSDKKey = Expiring<ServerSideKey>;
 
 #[derive(Parser, Debug)]
+#[command(name = "ldactl")]
+#[command(about = "LaunchDarkly Relay AutoConfig CLI", long_about = Some("LaunchDarkly Relay AutoConfig CLI\n\nThis utility is used to fetch and parse the LaunchDarkly Relay AutoConfig stream and write it to a file or execute a command when changes are detected."))]
 struct Args {
     #[arg(short = 'k', long, env = "LD_RELAY_AUTO_CONFIG_KEY", value_parser=RelayAutoConfigKey::try_from_str)]
     credential: RelayAutoConfigKey,
