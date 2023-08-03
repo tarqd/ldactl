@@ -1,13 +1,38 @@
 use crate::credential::{ClientSideId as EnvironmentId, MobileKey, ServerSideKey};
 use serde::{de::Error, Deserialize, Deserializer, Serialize};
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    fmt::{self, Display, Formatter},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProjectKey(String);
 
+impl Display for ProjectKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl AsRef<str> for ProjectKey {
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EnvironmentKey(String);
+
+impl AsRef<str> for EnvironmentKey {
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+impl Display for EnvironmentKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 type Version = u64;
 type UnixTimestamp = u64;
@@ -53,9 +78,9 @@ pub struct PatchEvent {
         serialize_with = "serialize_env_id_path"
     )]
     #[serde(rename = "path")]
-    env_id: EnvironmentId,
+    pub env_id: EnvironmentId,
     #[serde(rename = "data")]
-    environment: EnvironmentConfig,
+    pub environment: EnvironmentConfig,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutData {
@@ -63,8 +88,8 @@ pub struct PutData {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutEvent {
-    path: String,
-    data: PutData,
+    pub path: String,
+    pub data: PutData,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,8 +100,8 @@ pub struct DeleteEvent {
         serialize_with = "serialize_env_id_path",
         rename = "path"
     )]
-    env_id: EnvironmentId,
-    version: Version,
+    pub env_id: EnvironmentId,
+    pub version: Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,7 +111,6 @@ pub enum Message {
     Patch(PatchEvent),
     Delete(DeleteEvent),
     Reconnect,
-    Comment(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -110,7 +134,7 @@ mod tests {
     use crate::credential::ClientSideId;
     #[test]
     fn derialize_put() {
-        let ev = "{\"path\":\"/\",\"data\":{\"environments\":{\"62ea8c4afac9b011945f6791\":{\"envId\":\"62ea8c4afac9b011945f6791\",\"envKey\":\"test\",\"envName\":\"Test\",\"mobKey\":\"mob-b5734766-5a3d-4b41-b63f-2669a4fb6497\",\"projName\":\"Default\",\"projKey\":\"default\",\"sdkKey\":{\"value\":\"sdk-3d560391-904c-4afd-8075-faad7652ed1d\"},\"defaultTtl\":0,\"secureMode\":false,\"version\":6},\"62ea8c4afac9b011945f6792\":{\"envId\":\"62ea8c4afac9b011945f6792\",\"envKey\":\"production\",\"envName\":\"Production\",\"mobKey\":\"mob-6a161a22-6395-4c29-a9cd-88d4b5bf74d6\",\"projName\":\"Default\",\"projKey\":\"default\",\"sdkKey\":{\"value\":\"sdk-011511cd-335b-47af-9e01-05a0daf1d71e\"},\"defaultTtl\":0,\"secureMode\":false,\"version\":14},\"64a447c454eaac132a068d75\":{\"envId\":\"64a447c454eaac132a068d75\",\"envKey\":\"production\",\"envName\":\"Production\",\"mobKey\":\"mob-aa46ddd0-5d78-44d5-9337-c6bbd9965feb\",\"projName\":\"Example project\",\"projKey\":\"example-project\",\"sdkKey\":{\"value\":\"sdk-6c596994-34d0-4137-84c6-bef64a1732d0\"},\"defaultTtl\":0,\"secureMode\":false,\"version\":20},\"64a447c454eaac132a068d76\":{\"envId\":\"64a447c454eaac132a068d76\",\"envKey\":\"test\",\"envName\":\"Test\",\"mobKey\":\"mob-ca268c40-7c6b-4b36-a30c-0f9e93b68751\",\"projName\":\"Example project\",\"projKey\":\"example-project\",\"sdkKey\":{\"value\":\"sdk-35cbaa92-d78a-4c5e-aecf-52de2933e289\"},\"defaultTtl\":0,\"secureMode\":false,\"version\":20}}}}";
+        let _ev = "{\"path\":\"/\",\"data\":{\"environments\":{\"62ea8c4afac9b011945f6791\":{\"envId\":\"62ea8c4afac9b011945f6791\",\"envKey\":\"test\",\"envName\":\"Test\",\"mobKey\":\"mob-b5734766-5a3d-4b41-b63f-2669a4fb6497\",\"projName\":\"Default\",\"projKey\":\"default\",\"sdkKey\":{\"value\":\"sdk-3d560391-904c-4afd-8075-faad7652ed1d\"},\"defaultTtl\":0,\"secureMode\":false,\"version\":6},\"62ea8c4afac9b011945f6792\":{\"envId\":\"62ea8c4afac9b011945f6792\",\"envKey\":\"production\",\"envName\":\"Production\",\"mobKey\":\"mob-6a161a22-6395-4c29-a9cd-88d4b5bf74d6\",\"projName\":\"Default\",\"projKey\":\"default\",\"sdkKey\":{\"value\":\"sdk-011511cd-335b-47af-9e01-05a0daf1d71e\"},\"defaultTtl\":0,\"secureMode\":false,\"version\":14},\"64a447c454eaac132a068d75\":{\"envId\":\"64a447c454eaac132a068d75\",\"envKey\":\"production\",\"envName\":\"Production\",\"mobKey\":\"mob-aa46ddd0-5d78-44d5-9337-c6bbd9965feb\",\"projName\":\"Example project\",\"projKey\":\"example-project\",\"sdkKey\":{\"value\":\"sdk-6c596994-34d0-4137-84c6-bef64a1732d0\"},\"defaultTtl\":0,\"secureMode\":false,\"version\":20},\"64a447c454eaac132a068d76\":{\"envId\":\"64a447c454eaac132a068d76\",\"envKey\":\"test\",\"envName\":\"Test\",\"mobKey\":\"mob-ca268c40-7c6b-4b36-a30c-0f9e93b68751\",\"projName\":\"Example project\",\"projKey\":\"example-project\",\"sdkKey\":{\"value\":\"sdk-35cbaa92-d78a-4c5e-aecf-52de2933e289\"},\"defaultTtl\":0,\"secureMode\":false,\"version\":20}}}}";
         let s = r#"
         {
             "path": "/",

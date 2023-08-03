@@ -59,6 +59,10 @@ impl TryFrom<String> for RelayAutoConfigKey {
 
 impl std::fmt::Display for RelayAutoConfigKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
+        write!(
+            f,
+            "rel-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxx{}",
+            self.0.get(self.0.len() - 6..).unwrap_or("xxxxxx")
+        )
     }
 }

@@ -1,13 +1,13 @@
-pub mod error;
-mod traits;
-mod stack_string;
 mod credential;
+pub mod error;
 mod kind;
 mod kinds;
+
+mod traits;
 mod util;
-pub use traits::*;
 pub use kind::*;
 pub use kinds::*;
+pub use traits::*;
 
 mod consts {
     pub const SERVER_SIDE_KEY_LEN: usize = 40;
@@ -15,4 +15,3 @@ mod consts {
     pub const MOBILE_KEY_LEN: usize = 40;
     pub const CLIENT_SIDE_ID_LEN: usize = 24;
 }
-

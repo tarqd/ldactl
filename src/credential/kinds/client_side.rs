@@ -1,3 +1,5 @@
+use std::fmt::{Display, Formatter};
+
 use serde::{Deserialize, Serialize};
 
 use crate::credential::{
@@ -7,7 +9,11 @@ use crate::credential::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClientSideId(String);
-
+impl Display for ClientSideId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 impl HasConstKind for ClientSideId {
     const KIND: CredentialKind = CredentialKind::ClientSide;
 }
@@ -53,12 +59,6 @@ impl TryFrom<String> for ClientSideId {
     type Error = CredentialError;
     fn try_from(s: String) -> Result<Self, Self::Error> {
         Self::try_from_string(s)
-    }
-}
-
-impl std::fmt::Display for ClientSideId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
     }
 }
 

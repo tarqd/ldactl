@@ -1,4 +1,4 @@
-use crate::credential::util::validate_credential_uuid;
+use crate::credential::util::{validate_credential_uuid, validate_uuid_format};
 
 use super::{error::CredentialError, CredentialKind};
 
@@ -45,7 +45,7 @@ pub trait LaunchDarklyCredentialExt: LaunchDarklyCredential + HasConstKind {
                         .map(String::from_utf8_lossy)
                         .map(String::from),
                 })
-                .and_then(|b| validate_credential_uuid(Self::KIND, b))
+                .and_then(|b| validate_uuid_format(Self::KIND, b))
         } else {
             // client-side ID doesn't have a prefix
             // so we just check the length and characters

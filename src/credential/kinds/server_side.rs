@@ -58,6 +58,10 @@ impl TryFrom<String> for ServerSideKey {
 
 impl std::fmt::Display for ServerSideKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
+        write!(
+            f,
+            "sdk-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxx{}",
+            self.0.get(self.0.len() - 6..).unwrap_or("xxxxxx")
+        )
     }
 }
