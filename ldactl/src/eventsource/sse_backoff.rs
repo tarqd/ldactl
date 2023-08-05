@@ -1,4 +1,3 @@
-use crate::eventsource::retryable::Retryable;
 use backoff::backoff::Backoff;
 use std::time::Duration;
 pub trait WithMinimumBackoff<B>

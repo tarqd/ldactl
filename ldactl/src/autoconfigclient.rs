@@ -12,12 +12,12 @@ use crate::messages::{
     PutEvent,
 };
 
-use crate::eventsource::codec::Event;
 use crate::eventsource::{EventSource, EventSourceError};
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 use futures::{pin_mut, Future, Stream, TryStream};
 use tokio::sync::oneshot;
+use tokio_sse_codec::Event;
 
 use miette::Diagnostic;
 use pin_project::pin_project;

@@ -1,6 +1,6 @@
 use reqwest::StatusCode;
 
-use crate::eventsource::sse_codec::SSEDecodeError;
+use tokio_sse_codec::DecodeError as SSEDecodeError;
 
 pub trait Retryable {
     fn is_retryable(&self) -> bool;

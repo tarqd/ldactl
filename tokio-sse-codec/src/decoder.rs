@@ -1,8 +1,17 @@
-use bytes::{Buf, BytesMut};
+#[deny(warnings)]
+use super::{
+    bufext::{BufExt, Utf8DecodeDiagnostic},
+    diagnostic_errors::UTF8Error,
+    linescodec::{LinesCodec, LinesCodecError},
+    Event, Frame,
+};
+
+use bytes::{Buf, BufMut, BytesMut};
 use miette::Diagnostic;
 use thiserror::Error;
-use tokio_util::codec::{Decoder, Encoder, LinesCodec, LinesCodecError};
-use tracing::instrument;
+use tokio_util::codec::Decoder;
+use tracing::{instrument, trace, warn};
+
 /*
 stream        = [ bom ] *event
 event         = *( comment / field ) end-of-line
@@ -22,31 +31,13 @@ any-char      = %x0000-0009 / %x000B-000C / %x000E-10FFFF
                 ; a scalar value other than U+000A LINE FEED (LF) or U+000D CARRIAGE RETURN (CR)
 */
 
-// We only support UTF-8 in this house
-const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
-
 #[derive(Clone, Debug, PartialEq)]
-pub enum Item {
-    Comment(String),
-    Event(Event),
-    Retry(std::time::Duration),
-}
-#[derive(Clone, Debug, PartialEq)]
-pub struct Event {
-    pub id: Option<String>,
-    pub name: String,
-    pub data: String,
-}
-impl Event {}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SSECodec {
+pub struct SSEDecoder {
     line_codec: LinesCodec,
-    line_count: usize,
-    current_line: Option<String>,
-    data_buf: Vec<u8>,
+    data_buf: BytesMut,
     event_type: String,
     event_id: String,
+    line_count: usize,
 }
 
 #[derive(Error, Diagnostic, Debug)]
@@ -54,34 +45,16 @@ pub enum SSEDecodeError {
     #[error("i/o error while reading stream")]
     Io(#[from] std::io::Error),
     #[error("unexpected end of stream")]
-    #[diagnostic(code(sse::unexpected_eof))]
-    #[diagnostic(help("the stream was closed by the source before completing the last event. make sure the source is sending valid SSE events"))]
+    #[diagnostic(help("the stream was closed by the source before completing the last event. this may be due to a disconnection or issue with the source."))]
     UnexpectedEof,
-    #[error("invalid utf-8")]
-    Utf8Error(#[from] std::str::Utf8Error),
-    #[error("max line length exceeded")]
-    MaxLineLengthExceeded(#[source] LinesCodecError),
+    #[error("{1}")]
+    Utf8Error(#[source] UTF8Error, String),
+    #[error("error from line codec")]
+    LineCodecError(#[source] LinesCodecError),
 }
 
-impl From<LinesCodecError> for SSEDecodeError {
-    fn from(err: LinesCodecError) -> Self {
-        match err {
-            LinesCodecError::Io(e) => Self::Io(e),
-            LinesCodecError::MaxLineLengthExceeded => Self::MaxLineLengthExceeded(err),
-        }
-    }
-}
-
-#[derive(Error, Diagnostic, Debug)]
-pub enum SSEEncodeError {
-    #[error("i/o error while writing stream")]
-    Io(#[from] std::io::Error),
-    #[error("invalid utf-8")]
-    Utf8(#[from] std::str::Utf8Error),
-}
-
-impl SSECodec {
-    /// Returns an `SSECodec` with no line length limit.
+impl SSEDecoder {
+    /// Returns an `SSECodec`
     ///
     /// # Note
     ///
@@ -92,16 +65,18 @@ impl SSECodec {
     /// without any `\n` characters, causing unbounded memory consumption.
     ///
     /// [`LinesCodecError`]: tokio-util::codec::LinesCodecError
-    pub fn new() -> Self {
+    pub fn new(last_id: Option<String>, max_line_len: Option<usize>) -> Self {
         Self {
-            line_codec: LinesCodec::new(),
-            line_count: 0usize,
-            data_buf: Vec::new(),
-            current_line: None,
+            line_codec: max_line_len
+                .map(|v| LinesCodec::new_with_max_length(v))
+                .unwrap_or_else(|| LinesCodec::new()),
+            data_buf: BytesMut::new(),
             event_type: String::new(),
-            event_id: String::new(),
+            event_id: last_id.unwrap_or_default(),
+            line_count: 0usize,
         }
     }
+
     /// Returns a `SSECodec` with a maximum line length limit.
     ///
     /// If this is set, calls to `SSECodec::decode` will return a
@@ -121,47 +96,48 @@ impl SSECodec {
     ///
     /// [`LinesCodecError`]: tokio-util::codec::LinesCodecError
     pub fn with_max_line_length(max_line_length: usize) -> Self {
-        Self {
-            line_codec: LinesCodec::new_with_max_length(max_line_length),
-            line_count: 0usize,
-            data_buf: Vec::new(),
-            current_line: None,
-            event_type: String::new(),
-            event_id: String::new(),
+        Self::new(None, Some(max_line_length))
+    }
+
+    /// Returns the current value of the event id buffer
+    /// This value is set by when `id` field is received
+    /// It is not cleared after an event is dispatched
+    pub fn last_event_id(&self) -> Option<&'_ str> {
+        if self.event_id.is_empty() {
+            None
+        } else {
+            Some(&self.event_id)
         }
+    }
+    // Returns the current value of the event type buffer
+    // This value is set by when `event` field is received
+    // It is cleared when an event is dispatched
+    // Defaults to `message` if not set
+    pub fn current_event_type(&self) -> &'_ str {
+        static MESSAGE: &str = "message";
+        if self.event_type.is_empty() {
+            MESSAGE
+        } else {
+            &self.event_type
+        }
+    }
+    /// Returns the maximum line length when decoding.
+    pub fn max_length(&self) -> usize {
+        self.line_codec.max_length()
     }
 }
 
-trait BufExt {
-    fn find(&self, byte: u8) -> Option<usize>;
-    fn advance_if(&mut self, byte: u8);
-    fn strip_utf8_bom(&mut self);
-}
-impl BufExt for &[u8] {
-    #[inline]
-    fn advance_if(&mut self, byte: u8) {
-        if !self.is_empty() && self[0] == byte {
-            self.advance(1)
-        }
-    }
-    #[inline]
-    fn find(&self, byte: u8) -> Option<usize> {
-        self.iter().position(|b| *b == byte)
-    }
-    #[inline]
-    fn strip_utf8_bom(&mut self) {
-        if self.starts_with(UTF8_BOM) {
-            self.advance(UTF8_BOM.len() + 1);
-        }
-    }
-}
-
-impl Decoder for SSECodec {
-    type Item = Item;
+impl Decoder for SSEDecoder {
+    type Item = Frame;
 
     type Error = SSEDecodeError;
-    #[instrument]
+    #[instrument(skip(self, src), err)]
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // check for utf8 bom at the start of the first line
+        trace!(buflen = src.len(), "attempting decode with line codec");
+        if self.line_count == 0 {
+            src.strip_utf8_bom();
+        }
         // Returning the loop expression let's use use break <result> to return
         return loop {
             //
@@ -170,17 +146,12 @@ impl Decoder for SSECodec {
             // 2. Can emit an event
             // 3. Need to bail with an error and close the stream
 
-            let current_line = match self.line_codec.decode(src) {
+            let mut src = match self.line_codec.decode(src) {
                 Ok(Some(line)) => line,
                 Ok(None) => break Ok(None),
                 Err(e) => break Err(e.into()),
             };
-
-            // TODO: Use this for better diagnostics
             self.line_count += 1;
-            let mut src = current_line.as_bytes();
-            src.strip_utf8_bom();
-
             //
             // Event Dispatch
             //
@@ -194,8 +165,8 @@ impl Decoder for SSECodec {
                 }
                 // If the data buffer's last character is a U+000A LINE FEED (LF) character,
                 // then remove the last character from the data buffer.
-                if self.data_buf[self.data_buf.len() - 1] == b'\n' {
-                    self.data_buf.pop();
+                if self.data_buf.ends_with(b"\n") {
+                    self.data_buf.truncate(self.data_buf.len() - 1);
                 }
                 // Use the last id we saw
                 let event_id = (!self.event_id.is_empty()).then_some(self.event_id.clone());
@@ -209,10 +180,15 @@ impl Decoder for SSECodec {
                 // Reset event type but not the id
                 self.event_type.clear();
                 // Consumes and resets the data buffer
-                let data_buf = std::str::from_utf8(&self.data_buf).map(str::to_owned)?;
+                // We check utf-8 validity here since we're combing data from across lines
+                let data_buf = self
+                    .data_buf
+                    .decode_utf8_owned()
+                    .into_decode_diagnostic("failed to decode data buffer during event dispatch")?;
                 self.data_buf.clear();
+
                 // Ready to emit :)
-                break Ok(Some(Item::Event(Event {
+                break Ok(Some(Frame::Event(Event {
                     id: event_id,
                     name: event_type,
                     data: data_buf,
@@ -225,8 +201,9 @@ impl Decoder for SSECodec {
                 src.advance(1);
                 src.advance_if(b' ');
 
-                break Ok(Some(Item::Comment(
-                    unsafe { std::str::from_utf8_unchecked(src) }.to_owned(),
+                break Ok(Some(Frame::Comment(
+                    src.decode_utf8_owned()
+                        .into_decode_diagnostic("failed to decode comment")?,
                 )));
             }
 
@@ -235,14 +212,16 @@ impl Decoder for SSECodec {
             //
 
             // Spec says that if there's no colon, treat the whole line like the field name
-            let colon_pos = src.find(b':').unwrap_or(src.len());
-            let (field, mut value) = src.split_at(colon_pos);
+            let colon_pos = src.find_pos(b':').unwrap_or(src.len());
+            let field = src.split_to(colon_pos);
+            let mut value = src;
             // Advance past the semicolon and a single space (if it's there)
             value.advance(1);
             value.advance_if(b' ');
 
-            // Safe because the line we got from the codec is guaranteed utf-8
-            let value = unsafe { std::str::from_utf8_unchecked(value) };
+            let value = value
+                .decode_utf8()
+                .into_decode_diagnostic("failed to decode field value")?;
 
             //
             // Field dispatch
@@ -250,7 +229,7 @@ impl Decoder for SSECodec {
             // The steps to process the field given a field name and a field value depend on the field name
             // Field names must be compared literally, with no case folding performed.
             //
-            match field {
+            match field.as_ref() {
                 // If the field name is "event"
                 //   -> Set the event type buffer to field value.
                 b"event" => {
@@ -262,8 +241,8 @@ impl Decoder for SSECodec {
                 // -> Append the field value to the data buffer,
                 //    then append a single U+000A LINE FEED (LF) character to the data buffer.
                 b"data" => {
-                    self.data_buf.extend_from_slice(value.as_bytes());
-                    self.data_buf.push(b'\n');
+                    self.data_buf.put(value.as_bytes());
+                    self.data_buf.put_u8(b'\n');
                     continue;
                 }
                 // If the field name is "id"
@@ -274,7 +253,13 @@ impl Decoder for SSECodec {
                     if !value.as_bytes().contains(&b'\0') {
                         // TODO: not sure what to do if there's an empty id
                         self.event_id.clear();
-                        self.event_id.push_str(value)
+                        self.event_id.push_str(value);
+                    } else {
+                        warn!(
+                            field = "id",
+                            value,
+                            "ignore invalid value (reason: `id` must not contain null bytes)"
+                        );
                     }
                     continue;
                 }
@@ -284,19 +269,32 @@ impl Decoder for SSECodec {
                 //    and set the event stream's reconnection time to that integer.
                 // -> Otherwise, ignore the field.
                 b"retry" => {
-                    break Ok(value
+                    let retry = value
                         .parse()
                         .ok()
                         .map(std::time::Duration::from_millis)
-                        .map(Item::Retry))
+                        .map(Frame::Retry);
+
+                    if retry.is_none() {
+                        warn!(
+                            field = "retry",
+                            value, "ignoring invalid value (reason: failed to parse as duration)"
+                        );
+                    }
+                    break Ok(retry);
                 }
                 // Otherwise
                 // The field is ignored.
-                _ => continue,
+                _ => {
+                    let field = String::from_utf8_lossy(field.as_ref());
+                    warn!(field = field.as_ref(), "ignoring unknown field");
+                    continue;
+                }
             }
         };
     }
 
+    #[instrument(skip(self, buf), err)]
     fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         match self.decode(buf)? {
             Some(frame) => Ok(Some(frame)),
@@ -311,70 +309,41 @@ impl Decoder for SSECodec {
     }
 }
 
-impl Encoder<&Item> for SSECodec {
-    type Error = std::io::Error;
+impl Default for SSEDecoder {
+    fn default() -> Self {
+        Self::new(None, None)
+    }
+}
 
-    fn encode(&mut self, item: &Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        match item {
-            Item::Comment(comment) => {
-                // we may overallocate a little bit here for multi-line comments
-                // but that's fine, the buffer gets re-used
-                let line_count = comment.lines().count();
-                let count = ((b": \n".len()) * std::cmp::min(line_count, 1)) + comment.len();
-                dst.reserve(count);
-                for line in comment.lines() {
-                    dst.extend_from_slice(b": ");
-                    dst.extend_from_slice(line.as_bytes());
-                    dst.extend_from_slice(b"\n");
-                }
-            }
-            Item::Event(Event {
-                ref id,
-                ref name,
-                ref data,
-            }) => {
-                let count = {
-                    let mut count = 0usize;
-                    count += id.as_ref().map_or(0, |id| b"id: \n".len() + id.len());
-                    count += name.len() + b"event: \n".len();
-                    let line_count = data.lines().count();
-                    count += (b"data: \n".len()) * std::cmp::min(line_count, 1);
-                    count += data.len();
-                    count += 2; // \n\n
-                    count
-                };
-
-                dst.reserve(count);
-
-                if let Some(id) = id {
-                    dst.extend_from_slice(b"id: ");
-                    dst.extend_from_slice(id.as_bytes());
-                    dst.extend_from_slice(b"\n");
-                }
-
-                dst.extend_from_slice(b"event: ");
-                dst.extend_from_slice(name.as_bytes());
-                dst.extend_from_slice(b"\n");
-
-                for data in data.lines() {
-                    dst.extend_from_slice(b"data: ");
-                    dst.extend_from_slice(data.as_bytes());
-                    dst.extend_from_slice(b"\n");
-                }
-
-                dst.extend_from_slice(b"\n\n");
-            }
-            Item::Retry(retry) => {
-                let retry = retry.as_millis();
-                let count =
-                    b"retry: \n".len() + ((retry.checked_ilog10().unwrap_or(0) + 1) as usize);
-                dst.reserve(count);
-                dst.extend_from_slice(b"retry: ");
-                dst.extend_from_slice(retry.to_string().as_bytes());
-                dst.extend_from_slice(b"\n");
-            }
+impl From<LinesCodecError> for SSEDecodeError {
+    fn from(err: LinesCodecError) -> Self {
+        match err {
+            LinesCodecError::Io(e) => Self::Io(e),
+            _ => Self::LineCodecError(err),
         }
-        Ok(())
+    }
+}
+
+// Error utility traits
+trait IntoDecodeError {
+    fn into_decode_error(self, msg: &str) -> SSEDecodeError;
+}
+
+trait IntoDecodeDiagnostic<T, E>
+where
+    E: std::error::Error + Sized,
+{
+    fn into_decode_diagnostic(self, msg: &str) -> Result<T, E>;
+}
+impl<T> IntoDecodeDiagnostic<T, SSEDecodeError> for Result<T, UTF8Error> {
+    fn into_decode_diagnostic(self, msg: &str) -> Result<T, SSEDecodeError> {
+        self.map_err(|e| e.into_decode_error(msg))
+    }
+}
+
+impl IntoDecodeError for UTF8Error {
+    fn into_decode_error(self, msg: &str) -> SSEDecodeError {
+        SSEDecodeError::Utf8Error(self, msg.to_string())
     }
 }
 
@@ -403,12 +372,14 @@ mod test {
     #[tokio::test]
     async fn test_event() {
         let bytes = b"event: foo\ndata: bar\n\n";
-        let mut framed = FramedRead::new(&bytes[..], SSECodec::new());
+        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
         let event = framed.next().await.unwrap().unwrap();
-
+        let decoder = framed.decoder();
+        // should reset after event dispatch
+        assert_eq!(decoder.current_event_type(), "message");
         assert_eq!(
             event,
-            Item::Event(Event {
+            Frame::Event(Event {
                 id: None,
                 name: "foo".to_owned(),
                 data: "bar".to_owned()
@@ -416,17 +387,26 @@ mod test {
         );
     }
     #[tokio::test]
+    async fn test_current_event_type() {
+        let bytes = b"event: foo\ndata: bar\nevent: baz\n";
+        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
+        let _ = framed.next().await;
+        let decoder = framed.decoder();
+
+        assert_eq!(decoder.current_event_type(), "baz");
+    }
+    #[tokio::test]
     async fn test_event_retry() {
         let bytes = b"retry: 100\n";
-        let mut framed = FramedRead::new(&bytes[..], SSECodec::new());
+        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
         let event = framed.next().await.unwrap().unwrap();
 
-        assert_eq!(event, Item::Retry(std::time::Duration::from_millis(100)));
+        assert_eq!(event, Frame::Retry(std::time::Duration::from_millis(100)));
     }
     #[tokio::test]
     async fn test_event_retry_invalid() {
         let bytes = b"retry: foo\n";
-        let mut framed = FramedRead::new(&bytes[..], SSECodec::new());
+        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
         let event = framed.next().await;
 
         assert_eq!(event.is_none(), true);
@@ -434,9 +414,12 @@ mod test {
     #[tokio::test]
     async fn event_has_id() {
         let bytes = b"id: 1\nevent: foo\ndata: bar\n\n";
-        let mut framed = FramedRead::new(&bytes[..], SSECodec::new());
+        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
         let event = framed.next().await.unwrap().unwrap();
-        if let Item::Event(Event { id, .. }) = event {
+        let decoder = framed.decoder();
+        assert!(decoder.last_event_id().is_some());
+        assert_eq!(decoder.last_event_id().unwrap(), "1");
+        if let Frame::Event(Event { id, .. }) = event {
             assert_eq!(id, Some("1".to_owned()));
         } else {
             panic!("Expected event");
@@ -445,7 +428,7 @@ mod test {
     #[tokio::test]
     async fn require_new_line() {
         let bytes = b"event: foo\ndata: bar";
-        let mut framed = FramedRead::new(&bytes[..], SSECodec::new());
+        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
         let event = framed.next().await.unwrap();
 
         match event {

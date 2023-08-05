@@ -1,7 +1,7 @@
-use crate::eventsource::codec::Event;
 use crate::messages::{DeleteEvent, Message, PatchEvent, PutEvent};
 use miette::Diagnostic;
 use thiserror::Error;
+use tokio_sse_codec::Event;
 use tracing::{error_span, instrument, Instrument};
 
 #[derive(Debug, Error, Diagnostic)]

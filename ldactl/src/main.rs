@@ -26,10 +26,10 @@ static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_P
 mod eventsource;
 use crate::credential::RelayAutoConfigKey;
 use crate::credential::{LaunchDarklyCredential, LaunchDarklyCredentialExt};
-use crate::eventsource::sse_codec::{Event, Item, SSECodec, SSEDecodeError};
 use crate::eventsource::{EventSource, EventSourceError};
 use crate::messages::{Expirable, Expiring};
 use std::convert::TryFrom;
+use tokio_sse_codec::{DecodeError, Decoder, Event, Frame};
 
 type ExpirableSDKKey = Expirable<ServerSideKey>;
 type ExpiringSDKKey = Expiring<ServerSideKey>;
