@@ -1,32 +1,24 @@
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
-use std::hash::Hash;
-use std::ops::{Deref, DerefMut};
-use std::pin::{self, Pin};
-use std::sync::Arc;
-
 use crate::credential::{ClientSideId, LaunchDarklyCredential, RelayAutoConfigKey};
 use crate::message_event_source::MessageParseError;
 use crate::messages::{
     DeleteEvent, EnvironmentConfig, EnvironmentKey, Message, PatchEvent, ProjectKey, PutData,
     PutEvent,
 };
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
 
 use crate::eventsource::{EventSource, EventSourceError};
-use backoff::backoff::Backoff;
+
 use backoff::ExponentialBackoff;
-use futures::{pin_mut, Future, Stream, TryStream};
-use tokio::sync::oneshot;
-use tokio_sse_codec::Event;
+use futures::Stream;
 
 use miette::Diagnostic;
 use pin_project::pin_project;
-use reqwest::{Client, Request, RequestBuilder};
+use reqwest::{Client, RequestBuilder};
 use serde::Serialize;
 use thiserror::Error;
-use tracing::{
-    debug, debug_span, error, error_span, instrument, span, trace, trace_span, warn, warn_span,
-};
+use tracing::{debug, debug_span, error, instrument, trace, warn, warn_span};
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum AutoConfigClientError {
@@ -41,7 +33,7 @@ pub struct AutoConfigClient {
     environments: HashMap<ClientSideId, EnvironmentConfig>,
     request_builder: RequestBuilder,
     #[pin]
-    event_source: Pin<Box<EventSource<ExponentialBackoff>>>,
+    event_source: Pin<Box<EventSource>>,
     changes: VecDeque<ConfigChangeEvent>,
     is_initialized: bool,
 }
@@ -171,7 +163,7 @@ impl AutoConfigClient {
     #[instrument]
     fn create_event_source(
         request_builder: RequestBuilder,
-    ) -> Result<EventSource<ExponentialBackoff>, EventSourceError> {
+    ) -> Result<EventSource, EventSourceError> {
         EventSource::try_with_backoff(request_builder, None, ExponentialBackoff::default())
     }
     #[instrument(level= "debug", skip(source, value), fields(proj_key=%value.proj_key, env_key=%value.env_key, received_version=%value.version))]

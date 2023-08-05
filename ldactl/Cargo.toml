@@ -59,3 +59,4 @@ tracing-subscriber = { version = "0.3.17", features = [
 ] }
 clap = { version = "4.3.19", features = ["derive", "env"] }
 tempfile = "3.7.0"
+tracing-futures = { version = "0.2.5", features = ["tokio", "futures-03"] }
