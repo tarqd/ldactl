@@ -10,41 +10,33 @@
 //!
 //! # Quick Links
 //!
-//! - [`SSEDecoder`] - turns a bytes into [Frames][`Frame`]
-//! - [`SSEEncoder`] - turns [Frames][`Frame`] into bytes
+//! - [`SseDecoder`] - turns a bytes into [Frames][`Frame`]
+//! - [`SseEncoder`] - turns [Frames][`Frame`] into bytes
 //! - [`Frame`] - A parsed frame from an SSE stream containing either an event, comment or retry value
 //! - [`Event`] - SSE Event containing the name, data and optional id
 
 //! # Examples
 //!
 //! ```rust
-//! use tokio_sse_codec::{SSEDecoder, Frame, Event, SSEDecodeError};
-//! use tokio_util::codec::{FramedRead, Decoder};
+//! use futures::StreamExt;
 //! use tokio::io::AsyncRead;
+//! use tokio_util::codec::{FramedRead, Decoder};
+//! use tokio_sse_codec::{SseDecoder, Frame, Event, SseDecodeError};
 //!
-//! # async fn run() -> Result<(), SSEDecodeError> {
+//! # async fn run() -> Result<(), SseDecodeError> {
 //!     // you can use any stream or type that implements `AsyncRead`  
 //!     let data = "id: 1\nevent: example\ndata: hello, world\n\n";
-//!     let mut reader = FramedRead::new(data.as_bytes(), SSEDecoder::new());
+//!     let mut reader = FramedRead::new(data.as_bytes(), SseDecoder::new());
 //!
-//!     while let Some(frame) = reader.next().await? {
+//!     while let Some(Ok(frame)) = reader.next().await {
 //!          match frame {
-//!               Frame::Event(event) => println!("event: id={}, name={}, data={}", event.id, event.name, event.data),
+//!               Frame::Event(event) => println!("event: id={:?}, name={}, data={}", event.id, event.name, event.data),
 //!               Frame::Comment(comment) => println!("comment: {}", comment),
-//!               Frame::Retry(duration) => println!("retry: {:#?}", duration)
+//!               Frame::Retry(duration) => println!("retry: {:#?}", duration),
 //!          }
 //!     }
+//!     # Ok::<(), SseDecodeError>(())
 //!# }
-//!```
-//!
-//! ## Using Decoder::framed
-//! Instead of constructing a [`FramedRead`] manually, you can pass any `AsyncRead` the [`framed`] method
-//! ```rust
-//! use tokio_sse_codec::SSEDecoder;
-//! use tokio_util::codec::{FramedRead, Decoder};
-//! use tokio::io::AsyncRead;
-//!
-//! let reader = SSEDecoder::new().framed(data.as_bytes());
 //! ```
 //!
 //! ## Setting a buffer size limit
@@ -55,9 +47,9 @@
 //! The buffer should be able to hold a single event and it's data.
 //!
 //! ```rust
-//! use tokio_sse_codec::SSEDecoder;
+//! use tokio_sse_codec::SseDecoder;
 //!
-//! let decoder = SSEDecoder::with_max_size(1024);
+//! let decoder = SseDecoder::with_max_size(1024);
 //! ```
 //!
 //! [Server-Sent Events]: https://html.spec.whatwg.org/multipage/server-sent-events.html#server-sent-events
@@ -71,14 +63,15 @@
 //! [`Decoder`]: tokio_util::codec::Decoder
 //!
 #![deny(warnings)]
+#![deny(missing_docs)]
 mod bufext;
 mod decoder;
 mod encoder;
 mod errors;
 
-pub use decoder::{DecoderParts, SSEDecoder};
-pub use encoder::{SSEEncodeError as EncodeError, SSEEncoder};
-pub use errors::SSEDecodeError as DecodeError;
+pub use decoder::{DecoderParts, SseDecoder};
+pub use encoder::{SseEncodeError, SseEncoder};
+pub use errors::{DecodeUtf8Error, ExceededSizeLimitError, SseDecodeError};
 
 /// Represents a parsed frame from an SSE stream.
 /// See [Interpreting an Event Stream](https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation)

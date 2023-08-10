@@ -2,9 +2,8 @@ use miette::{Diagnostic, LabeledSpan, SourceCode, SourceSpan};
 use std::string::FromUtf8Error;
 use std::{fmt::Display, str::Utf8Error as StdUtf8Error};
 use thiserror::Error;
-use miette::Context
-/// Type for unrecoverable decoder errors
-/// Returned by [`SSEDecoder::decode`] and [`SSEDecoder::decode_eof`].
+
+/// Returned by [`SSEDecoder::decode`] and [`SSEDecoder::decode_eof`] for unrecoverable errors
 ///
 /// All of these errors are considered fatal and you should call decode again. You may use [`SSEDecoder::reset`] clear the internal state
 /// and re-use the decoder. This allows you to keep the allocated capacity in the internal buffers
@@ -13,7 +12,7 @@ use miette::Context
 /// [`SSEDecoder::decode_eof`]: ./struct.SSEDecoder.html#method.decode_eof
 /// [`SSEDecoder::reset`]: ./struct.SSEDecoder.html#method.reset
 #[derive(Error, Diagnostic, Debug)]
-pub enum SSEDecodeError {
+pub enum SseDecodeError {
     /// [`std::io::Error`], generally coming from the underlying stream
     #[error("i/o error while reading stream")]
     #[diagnostic(code(tokio_sse_codec::decoder::io_error), url(docsrs))]
@@ -29,23 +28,23 @@ pub enum SSEDecodeError {
     /// Invalid UTF-8 data was found in the stream
     #[error(transparent)]
     #[diagnostic(transparent)]
-    Utf8Error(#[from] UTF8Error),
+    Utf8Error(#[from] DecodeUtf8Error),
     /// The maximum buffer size was exceeded before we could dispatch the event being read.
     #[error(transparent)]
     #[diagnostic(transparent)]
-    ExceededSizeLimit(ExceededSizeLimit),
+    ExceededSizeLimit(ExceededSizeLimitError),
 }
 
-impl From<SSEDecodeError> for std::io::Error {
-    fn from(e: SSEDecodeError) -> Self {
+impl From<SseDecodeError> for std::io::Error {
+    fn from(e: SseDecodeError) -> Self {
         match e {
-            SSEDecodeError::Io(ref io) => std::io::Error::new(io.kind(), e),
-            SSEDecodeError::UnexpectedEof => {
+            SseDecodeError::Io(ref io) => std::io::Error::new(io.kind(), e),
+            SseDecodeError::UnexpectedEof => {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, e)
             }
 
-            SSEDecodeError::Utf8Error(_) => std::io::Error::new(std::io::ErrorKind::InvalidData, e),
-            SSEDecodeError::ExceededSizeLimit(..) => {
+            SseDecodeError::Utf8Error(_) => std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+            SseDecodeError::ExceededSizeLimit(..) => {
                 std::io::Error::new(std::io::ErrorKind::Other, e)
             }
         }
@@ -54,13 +53,13 @@ impl From<SSEDecodeError> for std::io::Error {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DecodeUtf8ErrorInner {
-    source: StdUtf8Error,
+    err: StdUtf8Error,
     buf: Vec<u8>,
 }
 impl DecodeUtf8ErrorInner {
     fn valid_str(&self) -> Option<&str> {
-        let start = self.source.valid_up_to();
-        let end = match self.source.error_len() {
+        let start = self.err.valid_up_to();
+        let end = match self.err.error_len() {
             Some(len) => start + len,
             None => return None,
         };
@@ -69,8 +68,8 @@ impl DecodeUtf8ErrorInner {
             .and_then(|s| std::str::from_utf8(s).ok())
     }
     fn remaining_label(&self) -> Option<LabeledSpan> {
-        let valid_offset = self.source.valid_up_to();
-        let error_len = self.source.error_len()?;
+        let valid_offset = self.err.valid_up_to();
+        let error_len = self.err.error_len()?;
         let displayed_offset = valid_offset + error_len;
         let remaining_len = self.buf.len() - displayed_offset;
         let valid_buf = &self.buf[0..valid_offset];
@@ -90,10 +89,10 @@ impl DecodeUtf8ErrorInner {
         }
     }
     fn invalid_label(&self) -> Option<LabeledSpan> {
-        let valid_len = self.source.valid_up_to();
+        let valid_len = self.err.valid_up_to();
 
         let buf: &[u8] = self.buf.as_ref();
-        self.source
+        self.err
             .error_len()
             .map(|len| {
                 let span = SourceSpan::from(0..valid_len);
@@ -134,39 +133,72 @@ impl SourceCode for DecodeUtf8ErrorInner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UTF8Error {
+/// Error indicating that the codec failed to decode bytes to valid utf-8.
+///
+/// This is a wrapper around [`std::str::Utf8Error`], which provides additional diagnastic information.
+/// You can get the original error with [`DecodeUtf8Error::utf8_error()`].
+pub struct DecodeUtf8Error {
     inner: DecodeUtf8ErrorInner,
 }
-impl std::error::Error for UTF8Error {
+
+impl DecodeUtf8Error {
+    /// Get a [`std::str::Utf8Error`] to get more details about the error.
+    pub fn utf8_error(&self) -> StdUtf8Error {
+        self.inner.err
+    }
+    /// Get a reference to the bytes that failed to decode
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.inner.buf
+    }
+    /// Returns the bytes that were attempted to convert to a String.
+    /// This method is carefully constructed to avoid allocation. It will consume the error, moving out the bytes, so that a copy of the bytes does not need to be made.
+    #[must_use = "`self` will be dropped if the result is not used"]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.inner.buf
+    }
+    /// Returns the inner error and buffer
+    /// This is essentially a short cut for
+    /// ```rust
+    /// # use tokio_sse_codec::DecodeUtf8Error;
+    ///
+    /// # fn example(err: DecodeUtf8Error) -> (std::str::Utf8Error, Vec<u8>) {
+    ///     let parts = (err.utf8_error(), err.into_bytes());
+    /// # return parts;
+    /// # }
+    /// ```
+    pub fn into_parts(self) -> (StdUtf8Error, Vec<u8>) {
+        (self.inner.err, self.inner.buf)
+    }
+    pub(crate) unsafe fn from_std(source: StdUtf8Error, buf: Vec<u8>) -> Self {
+        Self {
+            inner: DecodeUtf8ErrorInner { err: source, buf },
+        }
+    }
+}
+
+impl std::error::Error for DecodeUtf8Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.inner.source)
+        // transparently get the source from the inner error
+        self.inner.err.source()
     }
 }
-impl Display for UTF8Error {
+impl Display for DecodeUtf8Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.inner.source.fmt(f)
+        self.inner.err.fmt(f)
     }
 }
-impl From<FromUtf8Error> for UTF8Error {
+impl From<FromUtf8Error> for DecodeUtf8Error {
     fn from(e: FromUtf8Error) -> Self {
         Self {
             inner: DecodeUtf8ErrorInner {
-                source: e.utf8_error(),
+                err: e.utf8_error(),
                 buf: e.into_bytes(),
             },
         }
     }
 }
 
-impl UTF8Error {
-    pub(crate) unsafe fn from_std(source: StdUtf8Error, buf: Vec<u8>) -> Self {
-        Self {
-            inner: DecodeUtf8ErrorInner { source, buf },
-        }
-    }
-}
-
-impl Diagnostic for UTF8Error {
+impl Diagnostic for DecodeUtf8Error {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::<&str>::new("tokio_sse_codec::decoder::utf8_error"))
     }
@@ -212,38 +244,44 @@ impl Diagnostic for UTF8Error {
     code(tokio_sse_codec::decoder::exceeded_size_limit),
     url(docsrs)
 )]
-pub struct ExceededSizeLimit {
+
+/// Error indicating that the incoming data exceeded the set buffer size limit.
+pub struct ExceededSizeLimitError {
     limit: usize,
     incoming_len: usize,
     consumed_len: usize,
 }
 
-impl ExceededSizeLimit {
-    pub fn new(limit: usize, incoming_len: usize, consumed_len: usize) -> Self {
+impl ExceededSizeLimitError {
+    pub(crate) fn new(limit: usize, incoming_len: usize, consumed_len: usize) -> Self {
         Self {
             limit,
             incoming_len,
             consumed_len,
         }
     }
+    /// The limit that was set when creating the codec
+    /// If none was set, this defaults to `usize::MAX`
     pub fn limit(&self) -> usize {
         self.limit
     }
+    /// The size of the incoming data the codec needed to consume to process the next event in  bytes
     pub fn incoming_len(&self) -> usize {
         self.incoming_len
     }
+    /// The total size of the internal buffers of the codec in bytes
     pub fn consumed_len(&self) -> usize {
         self.consumed_len
     }
 }
 
-impl From<ExceededSizeLimit> for SSEDecodeError {
-    fn from(e: ExceededSizeLimit) -> Self {
+impl From<ExceededSizeLimitError> for SseDecodeError {
+    fn from(e: ExceededSizeLimitError) -> Self {
         Self::ExceededSizeLimit(e)
     }
 }
 
-impl From<FromUtf8Error> for SSEDecodeError {
+impl From<FromUtf8Error> for SseDecodeError {
     fn from(e: FromUtf8Error) -> Self {
         Self::Utf8Error(e.into())
     }

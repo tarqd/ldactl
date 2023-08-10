@@ -1,22 +1,22 @@
-#[deny(warnings)]
-use super::{Event, Frame};
+#![deny(warnings)]
+#![deny(missing_docs)]
+use crate::{errors::DecodeUtf8Error, Event, Frame};
 
+use bytes::{BufMut, BytesMut};
 use miette::Diagnostic;
 use thiserror::Error;
 use tokio_util::codec::Encoder;
-
-use bytes::{BufMut, BytesMut};
 use tracing::instrument;
 
-/// A [`tokio_util::codec::Encoder`] that encodes [`Frame`]s into a [`BytesMut`] buffer
+/// Encodes SSE [`Frame`]s into bytes
 ///
 /// # Examples
 /// ```
-/// use tokio_sse_codec::{SSEEncoder, Frame, Event};
+/// use tokio_sse_codec::{SseEncoder, Frame, Event};
 /// use tokio_util::codec::Encoder;
 /// use bytes::BytesMut;
 ///
-/// let mut encoder = SSEEncoder::new();
+/// let mut encoder = SseEncoder::new();
 /// let mut buf = BytesMut::new();
 /// encoder.encode(&Frame::Event(Event {
 ///    id: Some("1".to_string()),
@@ -28,27 +28,39 @@ use tracing::instrument;
 ///
 /// assert_eq!(result, "id: 1\nevent: example\ndata: hello, world\n\n");
 /// ```
+/// [`tokio::io::AsyncWrite`]: ../tokio/io/trait.AsyncWrite.html
 #[derive(Debug, PartialEq, Eq)]
-pub struct SSEEncoder {}
-impl SSEEncoder {
-    #[instrument]
+pub struct SseEncoder {}
+impl SseEncoder {
+    /// Creates a new [`SseEncoder`]
     pub fn new() -> Self {
         Self {}
     }
 }
 
-#[derive(Error, Diagnostic, Debug)]
-pub enum SSEEncodeError {
-    #[error("i/o error while writing stream")]
-    Io(#[from] std::io::Error),
-    #[error("invalid utf-8")]
-    Utf8(#[from] std::str::Utf8Error),
+impl Default for SseEncoder {
+    // Creates a new [`SseEncoder`] with default settings
+    // Today there are no settings so this is the same as [`SseEncoder::new`] but it's here for future compatibility
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl Encoder<&Frame> for SSEEncoder {
-    type Error = SSEEncodeError;
+#[derive(Error, Diagnostic, Debug)]
+/// Error returned by [`SseEncoder::encode`]
+pub enum SseEncodeError {
+    /// An i/o error occurred while writing the destination
+    #[error("i/o error while writing stream")]
+    Io(#[from] std::io::Error),
+    /// The data of an event contained invalid utf-8
+    #[error("invalid utf-8")]
+    Utf8(#[from] DecodeUtf8Error),
+}
+
+impl Encoder<&Frame> for SseEncoder {
+    type Error = SseEncodeError;
     #[instrument(skip(dst), err)]
-    fn encode(&mut self, item: &Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    fn encode(&mut self, item: &Frame, dst: &mut BytesMut) -> Result<(), SseEncodeError> {
         match item {
             Frame::Comment(comment) => {
                 // we may overallocate a little bit here for multi-line comments

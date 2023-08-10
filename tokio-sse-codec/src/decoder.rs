@@ -1,11 +1,8 @@
 #![deny(warnings)]
 #![deny(missing_docs)]
-use crate::bufext::BufMutExt;
-use crate::errors::ExceededSizeLimit;
-
-use super::{
-    bufext::{BufExt, Utf8DecodeDiagnostic},
-    errors::SSEDecodeError,
+use crate::{
+    bufext::{BufExt, BufMutExt, Utf8DecodeDiagnostic},
+    errors::{ExceededSizeLimitError, SseDecodeError},
     Event, Frame,
 };
 
@@ -13,23 +10,21 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Decoder;
 use tracing::{error, instrument, trace, warn};
 
-/// # SSE Decoder
-///
-/// Decodes events from an [`AsyncRead`] into [`Frames`]
+/// Decodes bytes from an SSE Stream into [`Frames`]
 ///
 /// ## Quick Links
-/// - [`SSEDecodeError`]: Type for unrecoverable decoder errors
-/// - [`Frame`]: Type representing a parsed frame returned by [`SSEDecoder::decode`]
+/// - [`SseDecodeError`]: Type for unrecoverable decoder errors
+/// - [`Frame`]: Type representing a parsed frame returned by [`SseDecoder::decode`]
 ///
 /// ## Example
 ///
 /// ```rust
 /// use bytes::BytesMut;
 /// use tokio_util::codec::Decoder;
-/// use tokio_sse_codec::{self as sse, Event, Frame};
+/// use tokio_sse_codec::{SseDecoder, Event, Frame};
 ///
 /// let mut buffer = BytesMut::from("data: hello\n\n");
-/// let mut decoder = sse::Decoder::new();
+/// let mut decoder = SseDecoder::new();
 /// let frame = decoder.decode(&mut buffer);
 /// assert!(matches!(frame, Ok(Some(Frame::Event(Event { id, name, data  })))));
 /// ```
@@ -56,8 +51,8 @@ use tracing::{error, instrument, trace, warn};
 /// ```
 /// [`AsyncRead`]: ../tokio/io/trait.AsyncWrite.html
 /// [`Frames`]: crate::Frame
-#[derive(Clone, Debug, PartialEq)]
-pub struct SSEDecoder {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SseDecoder {
     data_buf: BytesMut,
     event_type: String,
     event_id: String,
@@ -74,7 +69,7 @@ pub struct SSEDecoder {
 /// Tuple contains `(data_buf, event_type, event_id, max_buf_len)`
 pub type DecoderParts = (BytesMut, String, String, usize);
 
-impl SSEDecoder {
+impl SseDecoder {
     /// Returns an `SSECodec` with no maximum buffer size limit.
     ///
     /// # Note
@@ -93,7 +88,7 @@ impl SSEDecoder {
     /// Returns Decoder with a maximum buffer size limits.
     ///
     /// If this is set, calls to `SSECodec::decode` will return a
-    /// [`MaxBufSizeExceeded`] error if the event buffers reach this size before dispatching
+    /// [`ExceededSizeLimit`] error if the event buffers reach this size before dispatching
     /// an event. Subsequent calls will return `None`. You should not use an encoder after it
     /// returns an error. Doing so is undefined behavior.
     ///
@@ -105,7 +100,7 @@ impl SSEDecoder {
     /// exploit this unbounded buffer by sending an unbounded amount of input
     /// without any `\n` characters or data fields, causing unbounded memory consumption.
     ///
-    /// [`MaxBufSizeExceeded`]: crate::decoder::SSEDecodeError::ExceededSizeLimit
+    /// [`ExceededSizeLimit`]: crate::decoder::SseDecodeError::ExceededSizeLimit
     pub fn with_max_size(max_buf_size: usize) -> Self {
         debug_assert!(
             max_buf_size > 7,
@@ -197,7 +192,7 @@ impl SSEDecoder {
     }
 
     /// Resets the decoder to a state where it can decode events after closing
-    /// Calling this method is the equivalent of `let decoder = SSEDecoder::from_parts(unsafe { decoder.into_parts() })`
+    /// Calling this method is the equivalent of `let decoder = SseDecoder::from_parts(unsafe { decoder.into_parts() })`
     ///
     /// The difference is that this method does not consume `self` and you don't need to worry about constructing an invalid decoder
     pub fn reset(&mut self) {
@@ -208,14 +203,14 @@ impl SSEDecoder {
         self.is_closed = false;
     }
 
-    /// Clear internal buffers after closing to allow re-use via [`SSEDecoder::into_parts`]
+    /// Clear internal buffers after closing to allow re-use via [`SseDecoder::into_parts`]
     fn close(&mut self) {
         self.is_closed = true;
         self.data_buf.clear();
         self.event_type.clear();
     }
     /// Decodes the next line from the input
-    fn decode_line(&mut self, src: &mut BytesMut) -> Result<Option<Bytes>, SSEDecodeError> {
+    fn decode_line(&mut self, src: &mut BytesMut) -> Result<Option<Bytes>, SseDecodeError> {
         // if we're closed, we discard everything
         if self.is_closed {
             src.advance(src.len());
@@ -249,11 +244,9 @@ impl SSEDecoder {
                 src.advance(src.len());
                 self.close();
 
-                Err(SSEDecodeError::ExceededSizeLimit(ExceededSizeLimit::new(
-                    self.max_buf_len,
-                    src.len(),
-                    self.buf_len(),
-                )))
+                Err(SseDecodeError::ExceededSizeLimit(
+                    ExceededSizeLimitError::new(self.max_buf_len, src.len(), self.buf_len()),
+                ))
             }
             None => {
                 // We didn't find a line or reach the length limit, so the next
@@ -265,13 +258,13 @@ impl SSEDecoder {
     }
 }
 
-impl Decoder for SSEDecoder {
+impl Decoder for SseDecoder {
     type Item = Frame;
-    type Error = SSEDecodeError;
+    type Error = SseDecodeError;
 
     /// Attempt to decode an SSE frame from the input. If we can't dispatch a frame, `Ok(None)` will be returned.
     #[instrument(skip(self, src), err)]
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, SSEDecodeError> {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, SseDecodeError> {
         if self.line_count == 0 {
             src.strip_utf8_bom();
         }
@@ -380,7 +373,7 @@ impl Decoder for SSEDecoder {
                 //    then append a single U+000A LINE FEED (LF) character to the data buffer.
                 b"data" if src.len().saturating_add(1) > self.buf_remaining() => {
                     self.close();
-                    return Err(ExceededSizeLimit::new(
+                    return Err(ExceededSizeLimitError::new(
                         self.max_buf_len,
                         src.len().saturating_add(1),
                         self.buf_len(),
@@ -455,21 +448,21 @@ impl Decoder for SSEDecoder {
     }
 
     #[instrument(skip(self, buf), err)]
-    fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<Frame>, SSEDecodeError> {
+    fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<Frame>, SseDecodeError> {
         match self.decode(buf)? {
             Some(frame) => Ok(Some(frame)),
             None => {
                 if buf.is_empty() {
                     Ok(None)
                 } else {
-                    Err(SSEDecodeError::UnexpectedEof)
+                    Err(SseDecodeError::UnexpectedEof)
                 }
             }
         }
     }
 }
 
-impl Default for SSEDecoder {
+impl Default for SseDecoder {
     fn default() -> Self {
         Self::new()
     }
@@ -485,7 +478,7 @@ mod test {
     #[tokio::test]
     async fn empty_lines() {
         let mut src = BytesMut::from(b"event: foo\ndata: bar\n\nhi".as_ref());
-        let mut decoder = SSEDecoder::default();
+        let mut decoder = SseDecoder::default();
         let (first, second, third, fourth) = (
             decoder.decode_line(&mut src),
             decoder.decode_line(&mut src),
@@ -507,7 +500,7 @@ mod test {
     #[tokio::test]
     async fn test_event() {
         let bytes = b"event: foo\ndata: bar\n\n";
-        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
+        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
         let event = framed.next().await.unwrap().unwrap();
         let decoder = framed.decoder();
         // should reset after event dispatch
@@ -524,7 +517,7 @@ mod test {
     #[tokio::test]
     async fn test_current_event_type() {
         let bytes = b"event: foo\ndata: bar\nevent: baz\n";
-        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
+        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
         let _ = framed.next().await;
         let decoder = framed.decoder();
 
@@ -533,7 +526,7 @@ mod test {
     #[tokio::test]
     async fn test_event_retry() {
         let bytes = b"retry: 100\n";
-        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
+        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
         let event = framed.next().await.unwrap().unwrap();
 
         assert_eq!(event, Frame::Retry(std::time::Duration::from_millis(100)));
@@ -541,15 +534,15 @@ mod test {
     #[tokio::test]
     async fn test_event_retry_invalid() {
         let bytes = b"retry: foo\n";
-        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
+        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
         let event = framed.next().await;
 
-        assert_eq!(event.is_none(), true);
+        assert!(event.is_none());
     }
     #[tokio::test]
     async fn event_has_id() {
         let bytes = b"id: 1\nevent: foo\ndata: bar\n\n";
-        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
+        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
         let event = framed.next().await.unwrap().unwrap();
         let decoder = framed.decoder();
         assert_eq!(decoder.event_id, "1");
@@ -558,8 +551,8 @@ mod test {
     #[tokio::test]
     async fn require_new_line() {
         let bytes = b"event: foo\ndata: bar";
-        let mut framed = FramedRead::new(&bytes[..], SSEDecoder::default());
+        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
         let event = framed.next().await.unwrap();
-        assert!(matches!(event, Err(SSEDecodeError::UnexpectedEof)));
+        assert!(matches!(event, Err(SseDecodeError::UnexpectedEof)));
     }
 }

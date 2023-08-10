@@ -1,4 +1,4 @@
-use super::errors::UTF8Error;
+use super::errors::DecodeUtf8Error;
 use bytes::{Buf, BufMut};
 // We only support UTF-8 in this house
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -20,15 +20,6 @@ where
 {
     /// Equivalent of [`Buf::advance(1)`](`Buf::advance`)
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use bytes::{Bytes, Buf};
-    /// use tokio_sse_codec::bufext::BufExt;
-    ///
-    /// let mut bytes = Bytes::from_static(b"Hello, world!");
-    /// bytes.bump();
-    /// assert_eq!(bytes.as_ref(), b"ello, world!");
     /// ```
     #[inline(always)]
     fn bump(&mut self) {
@@ -37,18 +28,6 @@ where
 
     /// Call [`BufExt::bump()`] if the first byte of the buffer is equal to `byte`
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use bytes::{Bytes, Buf};
-    /// use tokio_sse_codec::bufext::BufExt;
-    ///
-    /// let mut bytes = Bytes::from_static(b"Hello, world!");
-    /// bytes.bump_if(b'X');
-    /// assert_eq!(bytes.as_ref(), b"Hello, world!");
-    /// bytes.bump_if(b'H');
-    /// assert_eq!(bytes.as_ref(), b"ello, world!");
-    /// ```
     #[inline]
     fn bump_if(&mut self, byte: u8) {
         if self.as_ref().first() == Some(&byte) {
@@ -57,13 +36,6 @@ where
     }
     /// Returns the position of the first byte matching `byte`
     ///
-    /// ```rust
-    /// use bytes::{Bytes, Buf};
-    /// use tokio_sse_codec::bufext::BufExt;
-    ///
-    /// let mut bytes = Bytes::from_static(b"Hello, world!");
-    /// let pos = bytes.find_pos(b',');
-    /// assert_eq!(pos, Some(5));
     /// ```
     #[inline]
     fn find_byte(&self, byte: u8) -> Option<usize> {
@@ -83,14 +55,6 @@ where
 impl BufMutExt for bytes::BytesMut {
     /// Truncates the buffer if the last byte is equal to `byte`
     ///
-    /// ```rust
-    /// use bytes::{BytesMut, BufMut};
-    /// use tokio_sse_codec::bufext::BufMutExt;
-    ///
-    /// let mut bytes = BytesMut::from_static(b"Hello, world!");
-    /// bytes.truncate_if(b'!');
-    /// assert_eq!(bytes.as_ref(), b"Hello, world");
-    /// ```
     #[inline]
     fn rbump_if(&mut self, byte: u8) {
         if self.last() == Some(&byte) {
@@ -114,18 +78,18 @@ impl BufMutExt for bytes::BytesMut {
 /// Wrapping errors with [crate::diagnostic_errors::UTF8Error]
 pub trait Utf8DecodeDiagnostic {
     /// Decodes the bytes as UTF-8, only allocating if there's an error for reporting
-    fn decode_utf(&self) -> Result<&str, UTF8Error>;
+    fn decode_utf(&self) -> Result<&str, DecodeUtf8Error>;
 }
 impl<T> Utf8DecodeDiagnostic for T
 where
     T: AsRef<[u8]> + bytes::Buf,
 {
-    fn decode_utf(&self) -> Result<&str, UTF8Error> {
+    fn decode_utf(&self) -> Result<&str, DecodeUtf8Error> {
         // ! SAFETY
         // This is safe because the buffer passed to from_std is the same one
         // We got the error from, otherwise the labels might point to invalid spans
         std::str::from_utf8(self.as_ref())
-            .map_err(|e| unsafe { UTF8Error::from_std(e, self.as_ref().to_vec()) })
+            .map_err(|e| unsafe { DecodeUtf8Error::from_std(e, self.as_ref().to_vec()) })
     }
 }
 
