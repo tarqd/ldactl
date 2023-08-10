@@ -8,7 +8,27 @@ use tokio_util::codec::Encoder;
 use bytes::{BufMut, BytesMut};
 use tracing::instrument;
 
-#[derive(Debug)]
+/// A [`tokio_util::codec::Encoder`] that encodes [`Frame`]s into a [`BytesMut`] buffer
+///
+/// # Examples
+/// ```
+/// use tokio_sse_codec::{SSEEncoder, Frame, Event};
+/// use tokio_util::codec::Encoder;
+/// use bytes::BytesMut;
+///
+/// let mut encoder = SSEEncoder::new();
+/// let mut buf = BytesMut::new();
+/// encoder.encode(&Frame::Event(Event {
+///    id: Some("1".to_string()),
+///    name: "example".to_string(),
+///    data: "hello, world".to_string(),
+/// }), &mut buf).unwrap();
+///
+/// let result = String::from_utf8(buf.to_vec()).unwrap();
+///
+/// assert_eq!(result, "id: 1\nevent: example\ndata: hello, world\n\n");
+/// ```
+#[derive(Debug, PartialEq, Eq)]
 pub struct SSEEncoder {}
 impl SSEEncoder {
     #[instrument]
@@ -76,7 +96,7 @@ impl Encoder<&Frame> for SSEEncoder {
                     dst.extend_from_slice(b"\n");
                 }
 
-                dst.extend_from_slice(b"\n\n");
+                dst.extend_from_slice(b"\n");
             }
             Frame::Retry(retry) => {
                 let retry = retry.as_millis();
