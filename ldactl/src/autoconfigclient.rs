@@ -8,14 +8,14 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 
-use crate::eventsource::{EventSource, EventSourceError};
+use crate::eventsource::{EventSource, EventSourceBuilder, EventSourceError};
 
 use backoff::ExponentialBackoff;
 use futures::Stream;
 
 use miette::Diagnostic;
 use pin_project::pin_project;
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, ClientBuilder, RequestBuilder, Url};
 use serde::Serialize;
 use thiserror::Error;
 use tracing::{debug, debug_span, error, instrument, trace, warn, warn_span};
@@ -31,7 +31,6 @@ pub enum AutoConfigClientError {
 #[pin_project]
 pub struct AutoConfigClient {
     environments: HashMap<ClientSideId, EnvironmentConfig>,
-    request_builder: RequestBuilder,
     #[pin]
     event_source: Pin<Box<EventSource>>,
     changes: VecDeque<ConfigChangeEvent>,
@@ -51,32 +50,24 @@ pub enum ConfigChangeEvent {
     Delete(EnvironmentConfig),
 }
 
-impl AutoConfigClient {
-    #[instrument(skip(request_builder))]
-    pub fn with_request_builder(
-        credential: RelayAutoConfigKey,
-        request_builder: RequestBuilder,
-    ) -> Self {
-        let builder = request_builder.header("authorization", credential.as_str());
+static DEFAULT_ENDPOINT: &'static str = "https://stream.launchdarkly.com/relay_auto_config";
 
-        let event_source = Self::create_event_source(builder.try_clone().unwrap()).unwrap();
-        Self {
-            request_builder: builder,
-            environments: HashMap::new(),
-            event_source: Box::pin(event_source),
-            changes: VecDeque::new(),
-            is_initialized: false,
-        }
+impl AutoConfigClient {
+    #[instrument(skip(credential), fields(credential=%credential, endpoint=%DEFAULT_ENDPOINT))]
+    pub fn new(credential: RelayAutoConfigKey) -> Self {
+        let event_source = EventSourceBuilder::get(Url::parse(DEFAULT_ENDPOINT).unwrap())
+            .authorization(credential.as_str())
+            .build()
+            .unwrap();
+        Self::from_event_source(event_source)
     }
 
-    #[instrument(skip(client, credential), fields(credential=%credential))]
-    pub fn new(credential: RelayAutoConfigKey, client: Client) -> Self {
-        let url = "https://stream.launchdarkly.com/relay_auto_config";
-        debug!(url, "created autoconfig client");
-        let builder = client.get(url).header("authorization", credential.as_str());
-        let event_source = Self::create_event_source(builder.try_clone().unwrap()).unwrap();
+    pub fn from_request(request: reqwest::Request) {
+        Self::from_event_source(EventSourceBuilder::from_request(request).build().unwrap());
+    }
+
+    pub fn from_event_source(event_source: EventSource) -> Self {
         Self {
-            request_builder: builder,
             environments: HashMap::new(),
             event_source: Box::pin(event_source),
             changes: VecDeque::new(),
@@ -154,18 +145,6 @@ impl AutoConfigClient {
         }
     }
 
-    #[instrument(skip(self))]
-    fn reconnect(mut self: std::pin::Pin<&mut Self>) {
-        *self.as_mut().project().event_source =
-            Box::pin(Self::create_event_source(self.request_builder.try_clone().unwrap()).unwrap());
-    }
-
-    #[instrument]
-    fn create_event_source(
-        request_builder: RequestBuilder,
-    ) -> Result<EventSource, EventSourceError> {
-        EventSource::try_with_backoff(request_builder, None, ExponentialBackoff::default())
-    }
     #[instrument(level= "debug", skip(source, value), fields(proj_key=%value.proj_key, env_key=%value.env_key, received_version=%value.version))]
     fn update_environment(
         source: &mut HashMap<ClientSideId, EnvironmentConfig>,
@@ -297,7 +276,7 @@ impl AutoConfigClient {
                 let span = debug_span!("reconnect");
                 let _span = span.enter();
                 debug!("server requested reconnect");
-                self.as_mut().reconnect();
+                self.event_source.as_mut().reconnect();
                 VecDeque::new()
             }
         }

@@ -2,6 +2,7 @@ use std::{
     borrow::BorrowMut,
     ops::{Add, AddAssign, Deref, DerefMut},
     pin::{self, pin, Pin},
+    sync::{Arc, Mutex},
     task::Poll::{self, Pending, Ready},
     time::Duration,
 };
@@ -20,12 +21,12 @@ use futures::{Future, FutureExt, StreamExt, TryStreamExt};
 
 use miette::Diagnostic;
 use pin_project::pin_project;
-use reqwest::{RequestBuilder, Response};
+use reqwest::{ClientBuilder, RequestBuilder, Response, Url};
 use thiserror::Error;
 use tokio_stream::Stream;
 
 use tokio_util::{codec::FramedRead, compat::FuturesAsyncReadCompatExt};
-use tracing::{debug, debug_span, error, error_span, instrument, trace, warn, Span};
+use tracing::{debug, debug_span, error, instrument, trace, warn, Span, info};
 use tracing_futures::Instrument;
 
 #[derive(Debug, Error, Diagnostic)]
@@ -40,25 +41,46 @@ pub enum EventSourceError {
     MaxRetriesExceeded(usize, #[source] Option<Box<EventSourceError>>),
     #[error("error while decoding sse event")]
     #[diagnostic(help("set RUST_LOG=\"{}::eventsource::sse_codec=debug\"", env!("CARGO_PKG_NAME")))]
-    DecodeError(#[from] sse_codec::DecodeError),
+    DecodeError(#[from] sse_codec::SseDecodeError),
     #[error("read timed out after {1:?}")]
     ReadTimeoutElapsed(#[source] tokio_stream::Elapsed, Duration),
     #[error("io error")]
     Io(#[from] std::io::Error),
+    #[error("max redirects exceeded after {0} attempts")]
+    TooManyRedirects(usize),
 }
 
 #[pin_project]
 pub struct EventSource {
-    request_builder: RequestBuilder,
-    backoff: MinimumBackoffDuration<Box<dyn Backoff>>,
+    pub(super) request_builder: RequestBuilder,
+    pub(super) backoff: MinimumBackoffDuration<Box<dyn Backoff>>,
     #[pin]
-    state: EventSourceState,
-    retry_attempts: usize,
-    last_event_id: Option<String>,
-    read_timeout: Duration,
+    pub(super) state: EventSourceState,
+    pub(super) retry_attempts: usize,
+    pub(super) last_event_id: Option<String>,
+    pub(super) read_timeout: Duration,
+    pub(super) retry_url: Arc<Mutex<Option<reqwest::Url>>>,
+    pub(super) is_retrying: bool,
 }
 
 impl EventSource {
+   
+   pub fn new(url: Url, last_event_id: Option<String>) -> Self {
+    super::EventSourceBuilder::new(url).last_event(last_event_id).build().unwrap()
+   }
+    
+    pub fn last_event_id(&self) -> Option<String> {
+        self.last_event_id.clone()
+    }
+
+    
+    pub fn read_timeout(&self) -> Duration {
+        self.read_timeout
+    }
+    
+    
+   
+   
     #[instrument(skip(req, backoff))]
     pub fn try_with_backoff<T>(
         req: RequestBuilder,
@@ -69,20 +91,57 @@ impl EventSource {
         T: Backoff + Sized + 'static,
     {
         let builder = req
-            .header("accept", "text/event-stream")
-            .try_clone()
-            .ok_or_else(|| EventSourceError::RequestCloneError)?;
+        .header("accept", "text/event-stream")
+        .try_clone()
+        .ok_or_else(|| EventSourceError::RequestCloneError)?;
+        let (_, request) = builder.build_split();
+        let request = request?;
+
+        let url = Arc::new(Mutex::new(Some(request.url().clone())));
+        let client = {
+            let url = url.clone();
+            ClientBuilder::new()
+                .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                    let count = attempt.previous().len();
+                    if count > 10 {
+                        attempt.error(EventSourceError::TooManyRedirects(count))
+                    } else {
+                        if attempt.status() == reqwest::StatusCode::MOVED_PERMANENTLY {
+                            let next_url = attempt.url().clone();
+                            debug!(url=%next_url, "permanent redirect, setting url for future retries");
+                             let _ = url.lock()
+                                .expect("failed aquire lock for url")
+                                .insert(next_url);
+                            
+                        }
+                        attempt.follow()
+                    }
+                }))
+                .build()?
+        };
+
+
+        
+        // now combine the custom client with the request
+        let builder = RequestBuilder::from_parts(client, request);
 
         let b: Box<dyn Backoff> = Box::new(backoff);
 
         Ok(Self {
             request_builder: builder,
             backoff: b.with_minimum_duration(Duration::ZERO),
-            state: EventSourceState::New(debug_span!(parent:None, "new").entered()).into(),
+            state: EventSourceState::Initial,
             retry_attempts: 0,
             last_event_id: last_event_id,
             read_timeout: Duration::from_secs(5 * 60),
+            retry_url: url,
+            is_retrying: false
         })
+    }
+    
+    #[instrument(skip(self), fields(last_event_id=?self.last_event_id))]
+    pub fn reconnect(mut self: Pin<&mut Self>) {
+        self.as_mut().project().state.set(EventSourceState::ForceReconnect(Span::current().entered()))
     }
     #[instrument(skip(self,parent),fields(last_event_id=?self.last_event_id, attempt=self.retry_attempts+1))]
     fn send_request(self: Pin<&mut Self>, parent: Option<tracing::Id>) -> (StateAction, NextState) {
@@ -104,15 +163,26 @@ impl EventSource {
                 );
             }
         };
+
         if let Some(last_event_id) = &self.last_event_id {
             trace!("setting last-event-id header to {}", last_event_id);
             builder = builder.header("last-event-id", last_event_id.clone());
+        }
+        let (client, request) = builder.build_split();
+        let mut request = request.unwrap();
+        let next_url = self
+            .retry_url
+            .lock()
+            .expect("failed to acquire lock for url")
+            .clone();
+        if let Some(next_url) = next_url {
+            *request.url_mut() = next_url;
         }
 
         return (
             StateAction::Continue,
             Some(EventSourceState::Connect(
-                builder.send().in_current_span().boxed(),
+                client.execute(request).in_current_span().boxed(),
                 debug_span!(parent: None, "send_request", attempt=self.retry_attempts+1).entered(),
             )),
         );
@@ -139,7 +209,7 @@ impl EventSource {
             .into_async_read()
             .compat();
 
-        let framed_read = FramedRead::new(inner, sse_codec::Decoder::new(last_event_id, None))
+        let framed_read = FramedRead::new(inner, sse_codec::SseDecoder::new())
             .map_err(|e| EventSourceError::DecodeError(e))
             .in_current_span()
             .boxed();
@@ -164,8 +234,12 @@ impl EventSource {
         //let span = error_span!("handle_error").entered();
 
         if e.is_retryable() {
+            if !self.is_retrying {
+                self.as_mut().project().backoff.reset();
+                *self.as_mut().project().is_retrying = true;
+            }
             if let Some(retry_duration) = self.as_mut().project().backoff.next_backoff() {
-                debug!(next_attempt=?retry_duration, "recoverable error occurred, will retry");
+                warn!(next_attempt=?retry_duration, "recoverable error occurred, will retry");
                 (
                     StateAction::Continue,
                     Some(EventSourceState::WaitingForRetry(
@@ -214,6 +288,19 @@ impl Stream for EventSource {
             let state = this.state.project();
             #[allow(unreachable_code)]
             break match state {
+                StateProj::Initial => {
+                    let span = debug_span!("init").entered();
+                    self.as_mut().project().state.set(EventSourceState::New(span));
+                    // reset so we don't trigger the elapsed timeout
+                    self.as_mut().project().backoff.reset();
+                    continue;
+                },
+                StateProj::ForceReconnect(parent) => {
+                    let span = debug_span!(parent: &*parent, "force_reconnect").entered();
+                    info!("reconnect requested by client");
+                    self.as_mut().project().state.set(EventSourceState::New(span));
+                    continue;
+                }
                 StateProj::New(follow) => {
                     run_state!(self, send_request(None))
                 }

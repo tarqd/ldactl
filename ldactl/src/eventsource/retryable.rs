@@ -13,6 +13,7 @@ impl Retryable for EventSourceError {
             EventSourceError::MaxRetriesExceeded(..) => false,
             EventSourceError::DecodeError(_) => true,
             EventSourceError::ReadTimeoutElapsed(..) => true,
+            EventSourceError::TooManyRedirects(..) => false,
             // we will treat all i/o errors as retryable here
             EventSourceError::Io(_) => true,
         }

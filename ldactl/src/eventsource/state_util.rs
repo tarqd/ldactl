@@ -10,6 +10,8 @@ pub(crate) type NextState = Option<EventSourceState>;
 
 #[pin_project(project = StateProj)]
 pub(crate) enum EventSourceState {
+    Initial,
+    ForceReconnect(tracing::span::EnteredSpan),
     New(tracing::span::EnteredSpan),
     Connect(
         Pin<Box<dyn Future<Output = Result<Response, reqwest::Error>> + Send>>,
@@ -26,6 +28,8 @@ pub(crate) enum EventSourceState {
 impl std::fmt::Display for EventSourceState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            EventSourceState::Initial => write!(f, "Initial"),
+            EventSourceState::ForceReconnect(..) => write!(f, "ForcedReconnect"),
             EventSourceState::New(_) => write!(f, "New"),
             EventSourceState::Connect(_, _) => write!(f, "Connect"),
             EventSourceState::Connected(_, _) => write!(f, "Connected"),

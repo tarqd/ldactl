@@ -29,7 +29,7 @@ use crate::credential::{LaunchDarklyCredential, LaunchDarklyCredentialExt};
 use crate::eventsource::{EventSource, EventSourceError};
 use crate::messages::{Expirable, Expiring};
 use std::convert::TryFrom;
-use tokio_sse_codec::{DecodeError, Decoder, Event, Frame};
+use tokio_sse_codec::{Event, Frame, SseDecodeError, SseDecoder};
 
 type ExpirableSDKKey = Expirable<ServerSideKey>;
 type ExpiringSDKKey = Expiring<ServerSideKey>;
@@ -80,8 +80,7 @@ async fn main() -> Result<(), miette::Report> {
     let mut url = args.uri;
     url.path_segments_mut().unwrap().push("relay_auto_config");
 
-    let request = client.get(url).header("user-agent", APP_USER_AGENT);
-    let client = autoconfigclient::AutoConfigClient::with_request_builder(key, request);
+    let client = autoconfigclient::AutoConfigClient::new(key);
     pin_mut!(client);
 
     let (debounce_tx, debounce_rx) = tokio::sync::mpsc::channel(1);

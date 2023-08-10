@@ -8,11 +8,10 @@
 //! It should be implemented for any error that can occur while processing the stream.
 //!
 use super::eventsource::EventSourceError;
-use super::retryable::Retryable;
 use reqwest::Error as ReqwestError;
 use std::error::Error;
 use std::io::Error as IOError;
-use tokio_sse_codec::DecodeError as SSEDecodeError;
+use tokio_sse_codec::SseDecodeError;
 
 pub trait EventSourceErrorInnerError: Error + Into<EventSourceError> + private::Sealed {
     #[inline]
@@ -28,7 +27,7 @@ impl EventSourceErrorInnerError for EventSourceError {
     }
 }
 // trival Into/From impls
-impl EventSourceErrorInnerError for SSEDecodeError {}
+impl EventSourceErrorInnerError for SseDecodeError {}
 impl EventSourceErrorInnerError for ReqwestError {}
 
 // Downcast IO errors if the inner error is an eventsource error
@@ -52,5 +51,5 @@ mod private {
     impl Sealed for super::EventSourceError {}
     impl Sealed for super::ReqwestError {}
     impl Sealed for super::IOError {}
-    impl Sealed for super::SSEDecodeError {}
+    impl Sealed for super::SseDecodeError {}
 }
