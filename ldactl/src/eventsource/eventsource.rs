@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use sse_codec::BytesStr;
 use tokio_sse_codec::{self as sse_codec, Event};
 
 use super::sse_backoff::{MinimumBackoffDuration, WithMinimumBackoff};
@@ -57,7 +58,7 @@ pub struct EventSource {
     #[pin]
     pub(super) state: EventSourceState,
     pub(super) retry_attempts: usize,
-    pub(super) last_event_id: Option<String>,
+    pub(super) last_event_id: Option<BytesStr>,
     pub(super) read_timeout: Duration,
     pub(super) retry_url: Arc<Mutex<Option<reqwest::Url>>>,
     pub(super) is_retrying: bool,
@@ -65,11 +66,11 @@ pub struct EventSource {
 
 impl EventSource {
    
-   pub fn new(url: Url, last_event_id: Option<String>) -> Self {
+   pub fn new(url: Url, last_event_id: Option<BytesStr>) -> Self {
     super::EventSourceBuilder::new(url).last_event(last_event_id).build().unwrap()
    }
     
-    pub fn last_event_id(&self) -> Option<String> {
+    pub fn last_event_id(&self) -> Option<BytesStr> {
         self.last_event_id.clone()
     }
 
@@ -132,7 +133,7 @@ impl EventSource {
             backoff: b.with_minimum_duration(Duration::ZERO),
             state: EventSourceState::Initial,
             retry_attempts: 0,
-            last_event_id: last_event_id,
+            last_event_id: last_event_id.map(BytesStr::from),
             read_timeout: Duration::from_secs(5 * 60),
             retry_url: url,
             is_retrying: false
@@ -166,7 +167,8 @@ impl EventSource {
 
         if let Some(last_event_id) = &self.last_event_id {
             trace!("setting last-event-id header to {}", last_event_id);
-            builder = builder.header("last-event-id", last_event_id.clone());
+            
+            builder = builder.header("last-event-id", last_event_id.deref());
         }
         let (client, request) = builder.build_split();
         let mut request = request.unwrap();
@@ -277,7 +279,7 @@ impl TryFrom<RequestBuilder> for EventSource {
 }
 
 impl Stream for EventSource {
-    type Item = Result<Event, EventSourceError>;
+    type Item = Result<Event<BytesStr>, EventSourceError>;
 
     fn poll_next(
         mut self: Pin<&mut Self>,
@@ -331,13 +333,13 @@ impl Stream for EventSource {
                             Frame::Comment(comment) => {
                                 let _span = debug_span!("read_frame::comment", ?comment).entered();
                                 span.record("kind", "comment");
-                                debug!(comment, "received comment");
+                                debug!(comment=comment.deref(), "received comment");
 
                                 continue;
                             }
                             Frame::Event(event) => {
                                 let _span =
-                                    debug_span!("read_frame::event", name=event.name, id=?event.id, data_len=event.data.len())
+                                    debug_span!("read_frame::event", name=event.name.deref(), id=?event.id, data_len=event.data.len())
                                         .entered();
                                 debug!("received event");
                                 if event.id.is_some() && event.id != *this.last_event_id {

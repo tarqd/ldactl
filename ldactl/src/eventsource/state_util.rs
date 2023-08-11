@@ -4,7 +4,9 @@ use super::EventSourceError;
 use futures::{Future, Stream};
 use pin_project::pin_project;
 use reqwest::Response;
-use tokio_sse_codec::{Event, Frame};
+use tokio_sse_codec::{BytesStr, Event as CodecEvent, Frame as CodecFrame};
+type Frame = CodecFrame<BytesStr>;
+type Event = CodecEvent<BytesStr>;
 
 pub(crate) type NextState = Option<EventSourceState>;
 

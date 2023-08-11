@@ -112,7 +112,7 @@ async fn main() -> Result<(), miette::Report> {
                         _ => {
                             if let Some(cmd) = args.exec.as_ref() {
                                 let args = args.exec_args.clone().unwrap_or_default();
-                                execute_hook(cmd.clone(), args, change).await;
+                                let _ = execute_hook(cmd.clone(), args, change).await;
                             }
                         }
                     }
@@ -125,7 +125,7 @@ async fn main() -> Result<(), miette::Report> {
 }
 
 #[instrument]
-async fn execute_hook(
+fn execute_hook(
     cmd: String,
     args: Vec<String>,
     change_event: ConfigChangeEvent,

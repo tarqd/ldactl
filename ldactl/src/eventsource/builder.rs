@@ -7,6 +7,7 @@ use reqwest::{
     ClientBuilder as ReqwestClientBuilder, Url,
 };
 use thiserror::Error;
+use tokio_sse_codec::BytesStr;
 use tracing::{debug_span, Span};
 
 use super::{sse_backoff::WithMinimumBackoff, EventSource};
@@ -37,7 +38,7 @@ pub struct EventSourceBuilder {
     backoff: Option<Box<dyn backoff::backoff::Backoff>>,
     client_builder: ReqwestClientBuilder,
     request: Result<reqwest::Request, EventSourceBuilderError>,
-    last_event_id: Option<String>,
+    last_event_id: Option<BytesStr>,
     error: Option<EventSourceBuilderError>,
     redirect_policy: reqwest::redirect::Policy,
 }
@@ -112,7 +113,7 @@ impl EventSourceBuilder {
                 .build(),
         )
     }
-    pub fn last_event(mut self, last_event_id: Option<String>) -> Self {
+    pub fn last_event(mut self, last_event_id: Option<BytesStr>) -> Self {
         self.last_event_id = last_event_id;
         self
     }
