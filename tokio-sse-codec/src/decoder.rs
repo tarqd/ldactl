@@ -1,22 +1,13 @@
 #![deny(missing_docs)]
 #![deny(warnings)]
-use std::{
-    borrow::{BorrowMut, Cow},
-    convert::Infallible,
-    marker::PhantomData,
-};
+use std::{borrow::Cow, convert::Infallible, marker::PhantomData};
 
 use crate::{
-    bufext::{BufExt, BufMutExt, Utf8DecodeDiagnostic},
-    decoder_impl::SseDecoderImpl,
-    errors::{ExceededSizeLimitError, SseDecodeError},
-    field_decoder::{Field, FieldFrame, FieldKind, SseFieldDecoder as FieldDecoder},
-    BytesStr, DecodeUtf8Error, Event, Frame,
+    decoder_impl::SseDecoderImpl, errors::SseDecodeError, BytesStr, DecodeUtf8Error, Event, Frame,
 };
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use tokio_util::codec::Decoder;
-use tracing::{error, instrument, trace, warn};
 
 /// Decodes bytes from an SSE Stream into [`Frame<T>`]
 ///  
@@ -176,11 +167,7 @@ impl<T> SseDecoder<T> {
 }
 
 mod sealed {
-    use std::{borrow::Cow, convert::Infallible};
 
-    use bytes::Bytes;
-
-    use crate::{bufext::Utf8DecodeDiagnostic, BytesStr, DecodeUtf8Error};
     pub trait SseFrame {
         type Data;
     }
@@ -207,12 +194,10 @@ impl TryFromBytesFrame for Frame<String> {
             Frame::Event(Event { id, name, data }) => Ok(Frame::Event(Event {
                 id,
                 name,
-                data: String::from_utf8(data.to_vec())?.into(),
+                data: String::from_utf8(data.to_vec())?,
             })),
             Frame::Retry(duration) => Ok(Frame::Retry(duration)),
-            Frame::Comment(comment) => {
-                Ok(Frame::Comment(String::from_utf8(comment.to_vec())?.into()))
-            }
+            Frame::Comment(comment) => Ok(Frame::Comment(String::from_utf8(comment.to_vec())?)),
         }
     }
 }
@@ -304,8 +289,8 @@ mod test {
             name: "foo".into(),
             data: Bytes::from_static(b"bar"),
         });
-        let test = Bytes::from_static(b"foo");
-        let my_frame = Frame::<String>::try_from_frame(byte_frame).unwrap();
+        let _test = Bytes::from_static(b"foo");
+        let _my_frame = Frame::<String>::try_from_frame(byte_frame).unwrap();
     }
     #[tokio::test]
     async fn test_event() {
@@ -354,7 +339,7 @@ mod test {
         let bytes = b"id: 1\nevent: foo\ndata: bar\n\n";
         let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
         let event = framed.next().await.unwrap().unwrap();
-        let decoder = framed.decoder();
+        let _decoder = framed.decoder();
 
         assert!(matches!(event, Frame::Event(Event { id: Some(v), .. }) if v.as_bytes() == b"1"));
     }
