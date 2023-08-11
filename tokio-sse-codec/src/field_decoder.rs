@@ -5,13 +5,19 @@ use crate::bufext::{BufExt, BufMutExt};
 use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::Decoder;
 use tracing::field;
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SseFieldDecoder {
     state: State,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct Field(FieldKind, Bytes);
+impl SseFieldDecoder {
+    /// Creates a new [`SseFieldDecoder`]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+pub type Field = (FieldKind, Bytes);
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum FieldKind {
@@ -102,7 +108,7 @@ impl State {
     fn take_field(&mut self, next_state: State, value: BytesMut) -> Field {
         let current_state = std::mem::replace(self, next_state);
         match current_state {
-            Self::Value { field_kind, .. } => Field(field_kind, value.freeze()),
+            Self::Value { field_kind, .. } => (field_kind, value.freeze()),
             _ => unreachable!(),
         }
     }
@@ -197,8 +203,7 @@ impl Decoder for SseFieldDecoder {
 
                             // no colon before new line, treat the whole thing as a field
                             break Ok(Some(
-                                Field(FieldKind::UnknownField(line.freeze()), Bytes::default())
-                                    .into(),
+                                (FieldKind::UnknownField(line.freeze()), Bytes::default()).into(),
                             ));
                         }
                         Some(_) => unreachable!(),
@@ -288,7 +293,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Event,
                 Bytes::from_static(b"test\n")
             )))
@@ -301,7 +306,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Data,
                 Bytes::from_static(b"test\n")
             )))
@@ -317,7 +322,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Data,
                 Bytes::from_static(b"hello world\n")
             )))
@@ -330,7 +335,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Comment,
                 Bytes::from_static(b"test\n")
             )))
@@ -343,7 +348,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Retry,
                 Bytes::from_static(b"1000\n")
             )))
@@ -356,7 +361,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Id,
                 Bytes::from_static(b"1000\n")
             )))
@@ -369,7 +374,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Event,
                 Bytes::from_static(b"\n")
             )))
@@ -382,7 +387,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Event,
                 Bytes::from_static(b"\n")
             )))
@@ -396,7 +401,7 @@ mod tests {
             let mut buf = BytesMut::from(format!("{}: value\n", field).as_bytes());
             let result = decoder.decode(&mut buf).unwrap();
             assert!(
-                matches!(result, Some(FieldFrame::Field(Field(_, value))) if value.as_ref() == b"value\n")
+                matches!(result, Some(FieldFrame::Field((_, value))) if value.as_ref() == b"value\n")
             );
         }
     }
@@ -407,7 +412,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::UnknownField(Bytes::from_static(b"event\n")),
                 Bytes::default()
             )))
@@ -420,7 +425,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::UnknownField(Bytes::from_static(b"event\r")),
                 Bytes::from_static(b"\r\n")
             )))
@@ -433,7 +438,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Event,
                 Bytes::from_static(b"test\n")
             )))
@@ -454,7 +459,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Event,
                 Bytes::from_static(b"test\n")
             )))
@@ -471,7 +476,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::UnknownField(Bytes::from_static(b"\xEF\xBBevent")),
                 Bytes::from_static(b"test\n")
             )))
@@ -484,7 +489,7 @@ mod tests {
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(
             result,
-            Some(FieldFrame::Field(Field(
+            Some(FieldFrame::Field((
                 FieldKind::Event,
                 Bytes::from_static("\u{feff}test\n".as_bytes())
             )))

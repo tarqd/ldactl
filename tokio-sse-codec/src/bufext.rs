@@ -9,7 +9,7 @@ pub(crate) trait BufExt: Buf {
     fn find_byte(&self, byte: u8) -> Option<usize>;
     fn strip_utf8_bom(&mut self);
 }
-pub(crate) trait BufMutExt: BufMut {
+pub(crate) trait BufMutExt: Buf {
     fn rbump_if(&mut self, byte: u8);
     fn rbump(&mut self);
 }
@@ -70,6 +70,26 @@ impl BufMutExt for bytes::BytesMut {
     fn rbump(&mut self) {
         if !self.is_empty() {
             unsafe { self.set_len(self.len() - 1) }
+        }
+    }
+}
+
+impl BufMutExt for bytes::Bytes {
+    /// Truncates the buffer if the last byte is equal to `byte`
+    ///
+    #[inline]
+    fn rbump_if(&mut self, byte: u8) {
+        if self.last() == Some(&byte) {
+            // ! SAFETY
+            // we just checked that there's at least 1 byte
+            self.truncate(self.len() - 1);
+        }
+    }
+
+    #[inline]
+    fn rbump(&mut self) {
+        if !self.is_empty() {
+            self.truncate(self.len() - 1);
         }
     }
 }

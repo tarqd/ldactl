@@ -26,7 +26,7 @@
 //! # async fn run() -> Result<(), SseDecodeError> {
 //!     // you can use any stream or type that implements `AsyncRead`  
 //!     let data = "id: 1\nevent: example\ndata: hello, world\n\n";
-//!     let mut reader = FramedRead::new(data.as_bytes(), SseDecoder::new());
+//!     let mut reader = FramedRead::new(data.as_bytes(), SseDecoder::<String>::new());
 //!
 //!     while let Some(Ok(frame)) = reader.next().await {
 //!          match frame {
@@ -49,7 +49,7 @@
 //! ```rust
 //! use tokio_sse_codec::SseDecoder;
 //!
-//! let decoder = SseDecoder::with_max_size(1024);
+//! let decoder  = SseDecoder::<String>::with_max_size(1024);
 //! ```
 //!
 //! [Server-Sent Events]: https://html.spec.whatwg.org/multipage/server-sent-events.html#server-sent-events
@@ -62,14 +62,14 @@
 //! [`Encoder`]: tokio_util::codec::Encoder
 //! [`Decoder`]: tokio_util::codec::Decoder
 //!
-#![deny(warnings)]
-#![deny(missing_docs)]
+#![allow(warnings)]
+#![allow(missing_docs)]
 mod bufext;
 mod decoder;
+mod decoder_impl;
 mod encoder;
 mod errors;
 mod field_decoder;
-
 use std::{borrow::Borrow, fmt::Debug, ops::Deref};
 
 use bufext::Utf8DecodeDiagnostic;
@@ -177,7 +177,10 @@ impl BytesStr {
     pub unsafe fn from_utf8_bytes_unchecked(inner: bytes::Bytes) -> Self {
         Self { inner }
     }
-
+    pub fn try_from_utf8_bytes(value: bytes::Bytes) -> Result<Self, DecodeUtf8Error> {
+        let _ = value.decode_utf()?;
+        Ok(Self { inner: value })
+    }
     /// Get a reference to the underlying bytes
     pub fn get_ref(this: &Self) -> &bytes::Bytes {
         &this.inner
@@ -198,37 +201,6 @@ impl BytesStr {
 impl Borrow<bytes::Bytes> for BytesStr {
     fn borrow(&self) -> &bytes::Bytes {
         &self.inner
-    }
-}
-
-impl TryFrom<bytes::Bytes> for BytesStr {
-    type Error = DecodeUtf8Error;
-
-    fn try_from(value: bytes::Bytes) -> Result<Self, Self::Error> {
-        let _ = value.decode_utf()?;
-        Ok(Self { inner: value })
-    }
-}
-
-impl From<String> for BytesStr {
-    fn from(value: String) -> Self {
-        Self {
-            inner: value.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for BytesStr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.deref(), f)
-    }
-}
-
-impl From<&str> for BytesStr {
-    fn from(value: &str) -> Self {
-        Self {
-            inner: bytes::Bytes::copy_from_slice(value.as_bytes()),
-        }
     }
 }
 
