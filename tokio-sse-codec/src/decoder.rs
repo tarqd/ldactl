@@ -1,9 +1,12 @@
 #![deny(warnings)]
 #![deny(missing_docs)]
+
+use std::borrow::{BorrowMut, Cow};
+
 use crate::{
-    bufext::{BufExt, BufMutExt, Utf8DecodeDiagnostic},
+    bufext::{BufExt, BufMutExt},
     errors::{ExceededSizeLimitError, SseDecodeError},
-    Event, Frame,
+    BytesStr, DecodeUtf8Error, Event, Frame,
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -54,8 +57,8 @@ use tracing::{error, instrument, trace, warn};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SseDecoder {
     data_buf: BytesMut,
-    event_type: String,
-    event_id: String,
+    event_type: std::borrow::Cow<'static, str>,
+    event_id: std::borrow::Cow<'static, str>,
     next_line_index: usize,
     line_count: usize,
     max_buf_len: usize,
@@ -66,8 +69,40 @@ pub struct SseDecoder {
 /// Most users should not use this directly unless you're re-using the buffers
 /// after consuming the decoder.
 ///
-/// Tuple contains `(data_buf, event_type, event_id, max_buf_len)`
-pub type DecoderParts = (BytesMut, String, String, usize);
+/// Tuple contains `(data_buf, max_buf_len)`
+pub type DecoderParts = (BytesMut, usize);
+// Optimizations for common event types
+// A little biased to supported LaunchDarkly use-cases :)
+static MESSAGE_EVENT: &[u8] = b"message";
+static PUT_EVENT: &[u8] = b"put";
+static PATCH_EVENT: &[u8] = b"patch";
+static DELETE_EVENT: &[u8] = b"delete";
+static PING_EVENT: &[u8] = b"ping";
+static MPING_EVENT: &[u8] = b"mping";
+static RECONNECT_EVENT: &[u8] = b"reconnect";
+static ERROR_EVENT: &[u8] = b"error";
+static STATIC_EVENTS: [&[u8]; 8] = [
+    MESSAGE_EVENT,
+    PUT_EVENT,
+    PATCH_EVENT,
+    DELETE_EVENT,
+    PING_EVENT,
+    MPING_EVENT,
+    RECONNECT_EVENT,
+    ERROR_EVENT,
+];
+
+/// Returns a static bytes for known events, otherwise returns `buf`
+fn get_event_type(buf: Bytes) -> Result<Cow<'static, str>, DecodeUtf8Error> {
+    for static_event in STATIC_EVENTS {
+        if buf == *static_event {
+            return Ok(Cow::Borrowed(unsafe {
+                std::str::from_utf8_unchecked(static_event)
+            }));
+        }
+    }
+    Ok(Cow::Owned(String::from_utf8(buf.to_vec())?))
+}
 
 impl SseDecoder {
     /// Returns an `SSECodec` with no maximum buffer size limit.
@@ -108,8 +143,8 @@ impl SseDecoder {
         );
         Self {
             data_buf: BytesMut::new(),
-            event_type: String::new(),
-            event_id: String::new(),
+            event_type: Cow::default(),
+            event_id: Cow::default(),
             line_count: 0usize,
             next_line_index: 0usize,
             max_buf_len: max_buf_size,
@@ -121,12 +156,7 @@ impl SseDecoder {
     /// This is useful for re-using the buffers when you're done with them
     /// See [`DecoderParts`]
     pub fn into_parts(self) -> DecoderParts {
-        (
-            self.data_buf,
-            self.event_type,
-            self.event_id,
-            self.max_buf_len,
-        )
+        (self.data_buf, self.max_buf_len)
     }
     /// Constructs a decoder from the internal buffers and state
     /// Mostly useful for testing and re-using the buffers
@@ -138,11 +168,11 @@ impl SseDecoder {
     ///
     /// See [`DecoderParts`]
     pub unsafe fn from_parts(parts: DecoderParts) -> Self {
-        let (data_buf, event_type, event_id, max_buf_size) = parts;
+        let (data_buf, max_buf_size) = parts;
         Self {
             data_buf,
-            event_type,
-            event_id,
+            event_type: Cow::default(),
+            event_id: Cow::default(),
             line_count: 0usize,
             next_line_index: 0usize,
             max_buf_len: max_buf_size,
@@ -154,12 +184,13 @@ impl SseDecoder {
     /// This value is set by when `event` field is received
     /// It is cleared when an event is dispatched
     /// Defaults to `message` if not set
-    pub fn current_event_type(&self) -> &'_ str {
-        static MESSAGE: &str = "message";
+    pub fn current_event_type(&self) -> Result<&'_ str, DecodeUtf8Error> {
         if self.event_type.is_empty() {
-            MESSAGE
+            // ! SAFETY
+            // We know that MESSAGE_EVENT is valid utf8 and never changes
+            Ok(unsafe { std::str::from_utf8_unchecked(MESSAGE_EVENT) })
         } else {
-            &self.event_type
+            Ok(self.event_type.as_ref())
         }
     }
     /// Returns the maximum buffer size when decoding.
@@ -197,7 +228,7 @@ impl SseDecoder {
     /// The difference is that this method does not consume `self` and you don't need to worry about constructing an invalid decoder
     pub fn reset(&mut self) {
         self.data_buf.clear();
-        self.event_type.clear();
+        self.event_type = Cow::default();
         self.line_count = 0;
         self.next_line_index = 0;
         self.is_closed = false;
@@ -207,7 +238,7 @@ impl SseDecoder {
     fn close(&mut self) {
         self.is_closed = true;
         self.data_buf.clear();
-        self.event_type.clear();
+        self.event_type = Cow::default();
     }
     /// Decodes the next line from the input
     fn decode_line(&mut self, src: &mut BytesMut) -> Result<Option<Bytes>, SseDecodeError> {
@@ -258,13 +289,12 @@ impl SseDecoder {
     }
 }
 
-impl Decoder for SseDecoder {
-    type Item = Frame;
-    type Error = SseDecodeError;
-
-    /// Attempt to decode an SSE frame from the input. If we can't dispatch a frame, `Ok(None)` will be returned.
-    #[instrument(skip(self, src), err)]
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, SseDecodeError> {
+impl SseDecoder {
+    fn decode_impl<T>(&mut self, src: &mut BytesMut) -> Result<Option<Frame<T>>, SseDecodeError>
+    where
+        T: TryFrom<Bytes> + Default,
+        SseDecodeError: std::convert::From<<T as std::convert::TryFrom<bytes::Bytes>>::Error>,
+    {
         if self.line_count == 0 {
             src.strip_utf8_bom();
         }
@@ -289,30 +319,49 @@ impl Decoder for SseDecoder {
                 // set the data buffer and the event type buffer
                 // to the empty string and return.
                 if self.data_buf.is_empty() {
-                    self.event_type.clear();
+                    self.data_buf.clear();
+                    match self.event_type.borrow_mut() {
+                        Cow::Borrowed(_) => {
+                            self.event_type = Cow::Borrowed(unsafe {
+                                std::str::from_utf8_unchecked(MESSAGE_EVENT)
+                            });
+                        }
+                        Cow::Owned(value) => {
+                            value.clear();
+                        }
+                    }
                     break Ok(None);
                 }
                 // If the data buffer's last character is a U+000A LINE FEED (LF) character,
                 // then remove the last character from the data buffer.
-                self.data_buf.rbump_if(b'\n');
-                // Use the last id we saw
-                let event_id = (!self.event_id.is_empty()).then_some(self.event_id.clone());
-                let event_type = {
-                    if self.event_type.is_empty() {
-                        String::from("message")
-                    } else {
-                        self.event_type.clone()
-                    }
+                let data_buf = {
+                    let mut v = self.data_buf.split();
+                    v.rbump_if(b'\n');
+                    v.freeze()
                 };
+
+                // Use the last id we saw
+                let event_id = if self.event_id.is_empty() {
+                    None
+                } else {
+                    Some(self.event_id.clone())
+                };
+
                 // Reset event type but not the id
-                self.event_type.clear();
+                let event_type: Cow<'static, str> = {
+                    let mut event_type: Cow<'static, str> =
+                        Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(MESSAGE_EVENT) });
+                    std::mem::swap(&mut event_type, &mut self.event_type);
+                    event_type
+                };
+
                 // Consumes and resets the data buffer
                 // We check utf-8 validity here since we're combing data from across lines
-                let data_buf = String::from_utf8(self.data_buf.to_vec())?;
-                self.data_buf.clear();
+                // data buf is clear after calling split
+                let data_buf = T::try_from(data_buf)?;
 
                 // Ready to emit :)
-                break Ok(Some(Frame::Event(Event {
+                break Ok(Some(Frame::<T>::Event(Event {
                     id: event_id,
                     name: event_type,
                     data: data_buf,
@@ -326,11 +375,10 @@ impl Decoder for SseDecoder {
                 src.bump();
                 src.bump_if(b' ');
 
-                break Ok(Some(Frame::Comment(if src.is_empty() {
-                    // does not allocate
-                    String::new()
+                break Ok(Some(Frame::<T>::Comment(if src.is_empty() {
+                    T::default()
                 } else {
-                    String::from_utf8(src.to_vec())?
+                    T::try_from(src)?
                 })));
             }
 
@@ -361,9 +409,12 @@ impl Decoder for SseDecoder {
                 // If the field name is "event"
                 //   -> Set the event type buffer to field value.
                 b"event" => {
-                    let value = src.decode_utf()?;
-                    self.event_type.clear();
-                    self.event_type.push_str(value);
+                    // utf-8 validity will be checked at dispatch
+
+                    // We can avoid useless bookkeeping if the event type is the same
+                    if self.event_type.as_bytes() != src {
+                        self.event_type = get_event_type(src)?;
+                    }
                     continue;
                 }
                 // If the field name is "data"
@@ -384,6 +435,7 @@ impl Decoder for SseDecoder {
                 // -> Append the field value to the data buffer,
                 //    then append a single U+000A LINE FEED (LF) character to the data buffer.
                 b"data" => {
+                    // utf-8 validity will be checked at dispatch
                     self.data_buf.put(src);
                     self.data_buf.put_u8(b'\n');
                     continue;
@@ -402,10 +454,8 @@ impl Decoder for SseDecoder {
                         );
                         continue;
                     }
-
-                    let value = src.decode_utf()?;
-                    self.event_id.clear();
-                    self.event_id.push_str(value);
+                    // utf-8 validity will be checked at dispatch
+                    self.event_id = String::from_utf8(src.to_vec())?.into();
                     continue;
                 }
                 // If the field name is "retry"
@@ -425,7 +475,7 @@ impl Decoder for SseDecoder {
                         .parse()
                         .ok()
                         .map(std::time::Duration::from_millis)
-                        .map(Frame::Retry);
+                        .map(Frame::<T>::Retry);
 
                     if retry.is_none() {
                         warn!(
@@ -446,19 +496,40 @@ impl Decoder for SseDecoder {
             };
         };
     }
-
-    #[instrument(skip(self, buf), err)]
-    fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<Frame>, SseDecodeError> {
-        match self.decode(buf)? {
+    fn decode_eof_impl<T>(&mut self, src: &mut BytesMut) -> Result<Option<Frame<T>>, SseDecodeError>
+    where
+        T: TryFrom<Bytes> + Default,
+        SseDecodeError: std::convert::From<<T as std::convert::TryFrom<bytes::Bytes>>::Error>,
+    {
+        match self.decode_impl(src)? {
             Some(frame) => Ok(Some(frame)),
             None => {
-                if buf.is_empty() {
+                if src.is_empty() {
                     Ok(None)
                 } else {
                     Err(SseDecodeError::UnexpectedEof)
                 }
             }
         }
+    }
+}
+
+impl Decoder for SseDecoder {
+    type Item = Frame<BytesStr>;
+    type Error = SseDecodeError;
+
+    /// Attempt to decode an SSE frame from the input. If we can't dispatch a frame, `Ok(None)` will be returned.
+    #[instrument(skip(self, src), err)]
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Frame<BytesStr>>, SseDecodeError> {
+        self.decode_impl(src)
+    }
+
+    #[instrument(skip(self, src), err)]
+    fn decode_eof(
+        &mut self,
+        src: &mut BytesMut,
+    ) -> Result<Option<Frame<BytesStr>>, SseDecodeError> {
+        self.decode_eof_impl(src)
     }
 }
 
@@ -504,13 +575,13 @@ mod test {
         let event = framed.next().await.unwrap().unwrap();
         let decoder = framed.decoder();
         // should reset after event dispatch
-        assert_eq!(decoder.current_event_type(), "message");
+        assert_eq!(decoder.current_event_type(), Ok("message"));
         assert_eq!(
             event,
             Frame::Event(Event {
                 id: None,
-                name: "foo".to_owned(),
-                data: "bar".to_owned()
+                name: "foo".into(),
+                data: "bar".into()
             })
         );
     }
@@ -521,7 +592,7 @@ mod test {
         let _ = framed.next().await;
         let decoder = framed.decoder();
 
-        assert_eq!(decoder.current_event_type(), "baz");
+        assert_eq!(decoder.current_event_type(), Ok("baz"));
     }
     #[tokio::test]
     async fn test_event_retry() {
@@ -546,7 +617,7 @@ mod test {
         let event = framed.next().await.unwrap().unwrap();
         let decoder = framed.decoder();
         assert_eq!(decoder.event_id, "1");
-        assert!(matches!(event, Frame::Event(Event { id: Some(v), .. }) if v == "1"));
+        assert!(matches!(event, Frame::Event(Event { id: Some(v), .. }) if v.as_bytes() == b"1"));
     }
     #[tokio::test]
     async fn require_new_line() {

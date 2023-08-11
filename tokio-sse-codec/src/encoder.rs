@@ -19,9 +19,9 @@ use tracing::instrument;
 /// let mut encoder = SseEncoder::new();
 /// let mut buf = BytesMut::new();
 /// encoder.encode(&Frame::Event(Event {
-///    id: Some("1".to_string()),
-///    name: "example".to_string(),
-///    data: "hello, world".to_string(),
+///    id: Some("1".into()),
+///    name: "example".into(),
+///    data: "hello, world".into(),
 /// }), &mut buf).unwrap();
 ///
 /// let result = String::from_utf8(buf.to_vec()).unwrap();
@@ -57,10 +57,10 @@ pub enum SseEncodeError {
     Utf8(#[from] DecodeUtf8Error),
 }
 
-impl Encoder<&Frame> for SseEncoder {
+impl Encoder<&Frame<String>> for SseEncoder {
     type Error = SseEncodeError;
     #[instrument(skip(dst), err)]
-    fn encode(&mut self, item: &Frame, dst: &mut BytesMut) -> Result<(), SseEncodeError> {
+    fn encode(&mut self, item: &Frame<String>, dst: &mut BytesMut) -> Result<(), SseEncodeError> {
         match item {
             Frame::Comment(comment) => {
                 // we may overallocate a little bit here for multi-line comments
