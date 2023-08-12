@@ -26,10 +26,10 @@ static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_P
 mod eventsource;
 use crate::credential::RelayAutoConfigKey;
 use crate::credential::{LaunchDarklyCredential, LaunchDarklyCredentialExt};
-use crate::eventsource::sse_codec::{Event, Item, SSECodec, SSEDecodeError};
 use crate::eventsource::{EventSource, EventSourceError};
 use crate::messages::{Expirable, Expiring};
 use std::convert::TryFrom;
+use tokio_sse_codec::{Event, Frame, SseDecodeError, SseDecoder};
 
 type ExpirableSDKKey = Expirable<ServerSideKey>;
 type ExpiringSDKKey = Expiring<ServerSideKey>;
@@ -80,8 +80,7 @@ async fn main() -> Result<(), miette::Report> {
     let mut url = args.uri;
     url.path_segments_mut().unwrap().push("relay_auto_config");
 
-    let request = client.get(url).header("user-agent", APP_USER_AGENT);
-    let client = autoconfigclient::AutoConfigClient::with_request_builder(key, request);
+    let client = autoconfigclient::AutoConfigClient::new(key);
     pin_mut!(client);
 
     let (debounce_tx, debounce_rx) = tokio::sync::mpsc::channel(1);
@@ -113,7 +112,7 @@ async fn main() -> Result<(), miette::Report> {
                         _ => {
                             if let Some(cmd) = args.exec.as_ref() {
                                 let args = args.exec_args.clone().unwrap_or_default();
-                                execute_hook(cmd.clone(), args, change).await;
+                                let _ = execute_hook(cmd.clone(), args, change).await;
                             }
                         }
                     }
@@ -126,7 +125,7 @@ async fn main() -> Result<(), miette::Report> {
 }
 
 #[instrument]
-async fn execute_hook(
+fn execute_hook(
     cmd: String,
     args: Vec<String>,
     change_event: ConfigChangeEvent,

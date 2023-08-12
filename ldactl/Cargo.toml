@@ -1,0 +1,61 @@
+[package]
+name = "launchdarkly-autoconfig"
+version = "0.1.0"
+edition = "2021"
+
+
+#[lib]
+#name = "launchdarkly_autoconfig"
+#path = "src/lib.rs"
+
+[[bin]]
+name = "ldactl"
+path = "src/main.rs"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio_sse_codec = { path = "../tokio-sse-codec" }
+tokio-util = { version = "0.7.8", features = [
+    "codec",
+    "futures-io",
+    "futures-util",
+    "io",
+    "io-util",
+    "tracing",
+    "compat",
+] }
+eventsource-client = "0.11.0"
+serde = { version = "1.0.178", features = ["derive"] }
+serde_json = "1.0.104"
+thiserror = "1.0.44"
+tokio = { version = "1.29.1", features = [
+    "bytes",
+    "io-util",
+    "macros",
+    "tracing",
+    "rt-multi-thread",
+] }
+tokio-stream = { version = "0.1.14", features = [
+    "io-util",
+    "net",
+    "tokio-util",
+    "time",
+] }
+tracing = "0.1.37"
+futures = "0.3.28"
+pin-project = "1.1.2"
+miette = { version = "5.10.0", features = ["fancy", "serde"] }
+reqwest = { version = "0.11.18", features = ["stream"] }
+bytes = "1.4.0"
+retry-policies = "0.2.0"
+backoff = "0.4.0"
+tracing-subscriber = { version = "0.3.17", features = [
+    "serde",
+    "serde_json",
+    "time",
+    "env-filter",
+    "local-time",
+] }
+clap = { version = "4.3.19", features = ["derive", "env"] }
+tempfile = "3.7.0"
+tracing-futures = { version = "0.2.5", features = ["tokio", "futures-03"] }

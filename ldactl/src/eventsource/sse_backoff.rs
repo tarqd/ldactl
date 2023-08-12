@@ -1,32 +1,33 @@
-use crate::eventsource::retryable::Retryable;
 use backoff::backoff::Backoff;
-use std::time::Duration;
+use std::{ops::DerefMut, time::Duration};
 pub trait WithMinimumBackoff<B>
 where
-    B: Backoff + Sized,
+    B: std::ops::Deref<Target = dyn Backoff> + Sized,
 {
-    fn minimum_duration(self, duration: Duration) -> MinimumBackoffDuration<B>;
+    fn with_minimum_duration(self, duration: Duration) -> MinimumBackoffDuration<B>;
 }
 
-impl<C> WithMinimumBackoff<backoff::exponential::ExponentialBackoff<C>>
-    for backoff::exponential::ExponentialBackoff<C>
+impl<B> WithMinimumBackoff<B> for B
 where
-    C: backoff::Clock + Sized,
+    B: std::ops::Deref<Target = dyn Backoff> + Sized,
 {
-    fn minimum_duration(self, duration: Duration) -> MinimumBackoffDuration<Self> {
+    fn with_minimum_duration(self, duration: Duration) -> MinimumBackoffDuration<Self> {
         MinimumBackoffDuration::new(self, duration)
     }
 }
 
 #[derive(Debug)]
-pub struct MinimumBackoffDuration<B: Backoff + Sized> {
+pub struct MinimumBackoffDuration<B>
+where
+    B: std::ops::Deref<Target = dyn Backoff> + Sized,
+{
     backoff: B,
     minimum_duration: Duration,
 }
 
 impl<B> MinimumBackoffDuration<B>
 where
-    B: Backoff + Sized,
+    B: std::ops::Deref<Target = dyn Backoff>,
 {
     pub fn new(backoff: B, minimum_duration: Duration) -> Self {
         Self {
@@ -41,15 +42,16 @@ where
 
 impl<B> Backoff for MinimumBackoffDuration<B>
 where
-    B: Backoff + Sized,
+    B: std::ops::DerefMut<Target = dyn Backoff> + Sized,
 {
     fn next_backoff(&mut self) -> Option<Duration> {
         self.backoff
+            .deref_mut()
             .next_backoff()
             .map(|duration| duration.max(self.minimum_duration))
     }
 
     fn reset(&mut self) {
-        self.backoff.reset();
+        self.backoff.deref_mut().reset();
     }
 }
