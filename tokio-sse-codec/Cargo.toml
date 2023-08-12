@@ -2,6 +2,9 @@
 name = "tokio_sse_codec"
 version = "0.1.0"
 edition = "2021"
+description = "Tokio codec for Server-Sent Events"
+license = "MIT"
+repository = "https://github.com/tarqd/ldactl/tree/workspace-refactor/tokio_sse_codec"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
