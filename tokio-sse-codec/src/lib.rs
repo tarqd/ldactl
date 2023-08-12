@@ -17,25 +17,24 @@
 
 //! # Examples
 //!
-//! ```rust
+//! ```
 //! use futures::StreamExt;
-//! use tokio::io::AsyncRead;
 //! use tokio_util::codec::{FramedRead, Decoder};
 //! use tokio_sse_codec::{SseDecoder, Frame, Event, SseDecodeError};
 //!
 //! # async fn run() -> Result<(), SseDecodeError> {
-//!     // you can use any stream or type that implements `AsyncRead`  
-//!     let data = "id: 1\nevent: example\ndata: hello, world\n\n";
-//!     let mut reader = FramedRead::new(data.as_bytes(), SseDecoder::<String>::new());
+//! // you can use any stream or type that implements `AsyncRead`  
+//! let data = "id: 1\nevent: example\ndata: hello, world\n\n";
+//! let mut reader = FramedRead::new(data.as_bytes(), SseDecoder::<String>::new());
 //!
-//!     while let Some(Ok(frame)) = reader.next().await {
-//!          match frame {
-//!               Frame::Event(event) => println!("event: id={:?}, name={}, data={}", event.id, event.name, event.data),
-//!               Frame::Comment(comment) => println!("comment: {}", comment),
-//!               Frame::Retry(duration) => println!("retry: {:#?}", duration),
-//!          }
+//! while let Some(Ok(frame)) = reader.next().await {
+//!     match frame {
+//!         Frame::Event(event) => println!("event: id={:?}, name={}, data={}", event.id, event.name, event.data),
+//!         Frame::Comment(comment) => println!("comment: {}", comment),
+//!         Frame::Retry(duration) => println!("retry: {:#?}", duration),
 //!     }
-//!     # Ok::<(), SseDecodeError>(())
+//! }
+//! # Ok::<(), SseDecodeError>(())
 //!# }
 //! ```
 //!
@@ -62,21 +61,22 @@
 //! [`Encoder`]: tokio_util::codec::Encoder
 //! [`Decoder`]: tokio_util::codec::Decoder
 //!
-#![allow(warnings)]
-#![allow(missing_docs)]
+#![deny(warnings)]
+#![deny(missing_docs)]
 mod bufext;
+mod bytestr;
 mod decoder;
 mod decoder_impl;
 mod encoder;
 mod errors;
 mod field_decoder;
-use std::{borrow::Borrow, fmt::Debug, ops::Deref};
+mod traits;
 
-use bufext::Utf8DecodeDiagnostic;
+pub use bytestr::BytesStr;
 pub use decoder::{DecoderParts, SseDecoder};
 pub use encoder::{SseEncodeError, SseEncoder};
 pub use errors::{DecodeUtf8Error, ExceededSizeLimitError, SseDecodeError};
-
+pub use traits::{TryFromBytesFrame, TryIntoFrame};
 /// Represents a parsed frame from an SSE stream.
 /// See [Interpreting an Event Stream](https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation)
 pub enum Frame<T> {
@@ -92,9 +92,9 @@ pub enum Frame<T> {
     Retry(std::time::Duration),
 }
 
-impl<T> Debug for Frame<T>
+impl<T> std::fmt::Debug for Frame<T>
 where
-    T: Debug,
+    T: std::fmt::Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -156,62 +156,6 @@ where
             Self::Event(event) => event.hash(state),
             Self::Retry(retry) => retry.hash(state),
         }
-    }
-}
-
-/// Represents a str reference backed by [`bytes::Bytes`]
-///
-/// This type is used to avoid allocations when parsing lines.
-/// The underlying bytes are guaranteed to contain valid utf-8
-/// It implements [`std::ops::Deref`] for [`str`] for convenience
-///
-/// It behaves as a smart pointer, so cloning it is cheap.
-#[derive(Default, Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
-pub struct BytesStr {
-    inner: bytes::Bytes,
-}
-impl BytesStr {
-    /// Creates a new instance from [`bytes::Bytes`]
-    /// # Safety
-    /// The underlying bytes must contain valid utf-8 or the behavior is undefined.
-    pub unsafe fn from_utf8_bytes_unchecked(inner: bytes::Bytes) -> Self {
-        Self { inner }
-    }
-    pub fn try_from_utf8_bytes(value: bytes::Bytes) -> Result<Self, DecodeUtf8Error> {
-        let _ = value.decode_utf()?;
-        Ok(Self { inner: value })
-    }
-    /// Get a reference to the underlying bytes
-    pub fn get_ref(this: &Self) -> &bytes::Bytes {
-        &this.inner
-    }
-    /// Consumes a `BytesStr` instance and returns the underlying bytes
-    pub fn into_bytes(this: Self) -> bytes::Bytes {
-        this.inner
-    }
-    /// Get a mutable reference to the underlying bytes
-    /// Manipulating the underlying bytes is not recommended.
-    /// # Safety
-    /// The underlying bytes must contain valid utf-8 or the behavior is undefined.
-    pub unsafe fn get_mut_unchecked(&mut self) -> &mut bytes::Bytes {
-        &mut self.inner
-    }
-}
-
-impl Borrow<bytes::Bytes> for BytesStr {
-    fn borrow(&self) -> &bytes::Bytes {
-        &self.inner
-    }
-}
-
-impl std::ops::Deref for BytesStr {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        // ! SAFETY:
-        // The underlying bytes are guaranteed to contain valid utf-8 by the decoder
-        // and the type can only constructed by the decoder
-        unsafe { std::str::from_utf8_unchecked(self.inner.as_ref()) }
     }
 }
 

@@ -4,10 +4,10 @@ use tokio_util::codec::Decoder;
 use tracing::warn;
 
 use crate::{
-    bufext::{BufExt, BufMutExt, Utf8DecodeDiagnostic},
+    bufext::{BufExt, BufMutExt},
     errors::{ExceededSizeLimitError, SseDecodeError},
-    field_decoder::{Field, FieldFrame, FieldKind, SseFieldDecoder as FieldDecoder},
-    BytesStr, DecodeUtf8Error, DecoderParts, Event, Frame,
+    field_decoder::{FieldFrame, FieldKind, SseFieldDecoder as FieldDecoder},
+    DecodeUtf8Error, DecoderParts, Event, Frame,
 };
 
 // Optimizations for common event types
@@ -62,7 +62,7 @@ impl SseDecoderImpl {
             "max_buf_size must be greater than 7 to parse any valid SSE frame"
         );
         Self {
-            field_decoder: FieldDecoder::new(),
+            field_decoder: FieldDecoder::with_max_buf_size(max_buf_size),
             data_buf: BytesMut::new(),
             event_type: Cow::Borrowed(MESSAGE_EVENT),
             event_id: Cow::Borrowed(EMPTY_ID),
@@ -110,7 +110,7 @@ impl SseDecoderImpl {
         self.max_buf_len
     }
 
-    fn buf_len(&self) -> usize {
+    pub(crate) fn buf_len(&self) -> usize {
         self.data_buf.len()
             + self.event_id.len()
             + match &self.event_type {
@@ -119,7 +119,7 @@ impl SseDecoderImpl {
             }
     }
 
-    fn buf_remaining(&self) -> usize {
+    pub(crate) fn buf_remaining(&self) -> usize {
         self.max_buf_len.saturating_sub(self.buf_len())
     }
 
@@ -153,10 +153,29 @@ impl SseDecoderImpl {
 // the event source parts
 impl SseDecoderImpl {
     pub fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Frame<Bytes>>, SseDecodeError> {
-        while let Some(field) = self.field_decoder.decode(src)? {
+        if self.is_closed {
+            // just consume everything while we're closed
+            src.clear();
+            return Ok(None);
+        }
+
+        while let Some(field) = {
+            self.field_decoder.set_consumed(self.buf_len());
+            self.field_decoder.decode(src)?
+        } {
             match field {
                 FieldFrame::Field((field, mut value)) => match field {
                     FieldKind::Data => {
+                        if value.len() > self.buf_remaining() {
+                            self.close();
+                            return Err(SseDecodeError::ExceededSizeLimit(
+                                ExceededSizeLimitError::new(
+                                    self.max_buf_len,
+                                    value.len(),
+                                    self.buf_len(),
+                                ),
+                            ));
+                        }
                         // we need to strip the carriage return
                         if value.len() >= 2 && &value[value.len() - 2..] == b"\r\n" {
                             value.truncate(value.len() - 2);
@@ -214,7 +233,7 @@ impl SseDecoderImpl {
                     FieldKind::UnknownField(field_name) => {
                         value.rbump();
                         value.rbump_if(b'\r');
-                        let field = String::from_utf8_lossy(value.as_ref());
+                        let field = String::from_utf8_lossy(field_name.as_ref());
                         let value = String::from_utf8_lossy(value.as_ref());
                         warn!(
                             field = field.as_ref(),
@@ -242,11 +261,7 @@ impl SseDecoderImpl {
                             std::mem::replace(&mut self.event_type, Cow::Borrowed(MESSAGE_EVENT));
                         // and the buffer (split clears it, leaving remaining capacity untouched)
                         let data = self.data_buf.split().freeze();
-                        return Ok(Some(Frame::Event(Event {
-                            id,
-                            name,
-                            data: data,
-                        })));
+                        return Ok(Some(Frame::Event(Event { id, name, data })));
                     }
                 }
             };
@@ -260,7 +275,7 @@ impl SseDecoderImpl {
         match self.decode(src)? {
             Some(frame) => Ok(Some(frame)),
             None => {
-                if src.is_empty() {
+                if src.is_empty() && self.data_buf.is_empty() {
                     Ok(None)
                 } else {
                     Err(SseDecodeError::UnexpectedEof)

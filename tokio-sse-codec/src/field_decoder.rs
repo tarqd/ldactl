@@ -1,19 +1,42 @@
-#![allow(warnings)]
-use std::{borrow::BorrowMut, ops::Range, thread::current};
-
-use crate::bufext::{BufExt, BufMutExt};
+use crate::{bufext::BufExt, ExceededSizeLimitError, SseDecodeError};
 use bytes::{Buf, Bytes, BytesMut};
+use std::borrow::BorrowMut;
 use tokio_util::codec::Decoder;
-use tracing::field;
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseFieldDecoder {
     state: State,
+    max_buf_len: usize,
+    consumed: usize,
 }
 
 impl SseFieldDecoder {
-    /// Creates a new [`SseFieldDecoder`]
+    /// Creates a new [`SseFieldDecoder`] with an unbounded buffer
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            state: State::default(),
+            max_buf_len: usize::MAX,
+            consumed: 0,
+        }
+    }
+    pub fn with_max_buf_size(max_buf_len: usize) -> Self {
+        assert!(max_buf_len > 7, "max_buf_len must be greater than 7, the length of the shortest possible field (data: \n)");
+        Self {
+            state: State::default(),
+            max_buf_len,
+            consumed: 0,
+        }
+    }
+    pub fn set_consumed(&mut self, consumed: usize) {
+        self.consumed = consumed;
+    }
+    fn buf_remaining(&self) -> usize {
+        self.max_buf_len - self.consumed
+    }
+}
+impl Default for SseFieldDecoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -82,24 +105,12 @@ impl State {
     fn set_next_field(&mut self) {
         *self = Self::field();
     }
-    #[inline(always)]
-    fn set_next_field_at(&mut self, at: usize) {
-        *self = Self::field_at(at);
-    }
+
     #[inline(always)]
     fn set_next_value(&mut self, kind: FieldKind) {
         *self = Self::value(kind);
     }
-    #[inline(always)]
-    fn set_value_at(&mut self, at: usize) {
-        match self {
-            State::Value {
-                field_kind,
-                next_line_index,
-            } => *next_line_index = at,
-            _ => unreachable!(),
-        }
-    }
+
     #[inline(always)]
     fn set_next_frame(&mut self) {
         *self = Self::NextFrame;
@@ -122,15 +133,16 @@ impl Default for State {
 impl Decoder for SseFieldDecoder {
     type Item = FieldFrame;
 
-    type Error = std::io::Error;
+    type Error = SseDecodeError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+        let max_read_to = self.buf_remaining();
         loop {
             match self.state.borrow_mut() {
                 _ if src.is_empty() => break Ok(None),
                 State::Bom => {
-                    let read_to = UTF8_BOM.len().min(src.len());
+                    let read_to = UTF8_BOM.len().min(src.len()).min(max_read_to);
                     match src.get(0..read_to) {
                         Some(bom) if bom == UTF8_BOM => {
                             src.advance(read_to);
@@ -146,6 +158,14 @@ impl Decoder for SseFieldDecoder {
                             // not a BOM
                             self.state.set_next_frame();
                             continue;
+                        }
+                        None if src.len() > max_read_to => {
+                            break Err(ExceededSizeLimitError::new(
+                                self.max_buf_len,
+                                src.len(),
+                                self.buf_remaining(),
+                            )
+                            .into());
                         }
                         None => {
                             break Ok(None);
@@ -174,7 +194,7 @@ impl Decoder for SseFieldDecoder {
                 },
                 State::Field { next_colon_index } => {
                     let start_from = *next_colon_index;
-                    let read_to = src.len();
+                    let read_to = src.len().min(max_read_to);
                     let line_or_colon_index = src[start_from..read_to]
                         .iter()
                         .position(|b| *b == b':' || *b == b'\n')
@@ -207,6 +227,14 @@ impl Decoder for SseFieldDecoder {
                             ));
                         }
                         Some(_) => unreachable!(),
+                        None if src.len() > max_read_to => {
+                            break Err(ExceededSizeLimitError::new(
+                                self.max_buf_len,
+                                src.len(),
+                                self.buf_remaining(),
+                            )
+                            .into());
+                        }
                         None => {
                             // we need to keep looking
                             *next_colon_index = read_to;
@@ -215,10 +243,10 @@ impl Decoder for SseFieldDecoder {
                     }
                 }
                 State::Value {
-                    field_kind,
+                    field_kind: _,
                     next_line_index,
                 } => {
-                    let read_to = src.len();
+                    let read_to = src.len().min(max_read_to);
                     let start_from = *next_line_index;
                     let new_line_index = src[start_from..read_to]
                         .iter()
@@ -242,6 +270,14 @@ impl Decoder for SseFieldDecoder {
                             let field = self.state.take_field(State::NextFrame, value);
                             break Ok(Some(field.into()));
                         }
+                        None if src.len() > max_read_to => {
+                            break Err(ExceededSizeLimitError::new(
+                                self.max_buf_len,
+                                src.len(),
+                                self.buf_remaining(),
+                            )
+                            .into());
+                        }
                         None => {
                             *next_line_index = read_to;
                             break Ok(None);
@@ -259,7 +295,7 @@ impl Decoder for SseFieldDecoder {
             if value.is_some() {
                 Ok(value)
             } else {
-                Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+                Err(SseDecodeError::UnexpectedEof)
             }
         }
     }
@@ -272,6 +308,11 @@ mod tests {
     use bytes::BufMut;
 
     use super::*;
+    #[test]
+    fn default_limit() {
+        let decoder = SseFieldDecoder::default();
+        assert_eq!(decoder.max_buf_len, usize::MAX);
+    }
     #[test]
     fn empty_line() {
         let mut decoder = SseFieldDecoder::default();

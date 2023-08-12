@@ -1,5 +1,5 @@
 use super::errors::DecodeUtf8Error;
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 // We only support UTF-8 in this house
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 

@@ -1,5 +1,6 @@
 #![deny(warnings)]
 #![deny(missing_docs)]
+
 use crate::{errors::DecodeUtf8Error, Event, Frame};
 
 use bytes::{BufMut, BytesMut};
@@ -18,23 +19,29 @@ use tracing::instrument;
 ///
 /// let mut encoder = SseEncoder::new();
 /// let mut buf = BytesMut::new();
-/// encoder.encode(&Frame::Event(Event {
+/// let frame : Frame<String> = Frame::Event(Event {
 ///    id: Some("1".into()),
 ///    name: "example".into(),
 ///    data: "hello, world".into(),
-/// }), &mut buf).unwrap();
+/// });
+/// encoder.encode(frame, &mut buf).unwrap();
 ///
 /// let result = String::from_utf8(buf.to_vec()).unwrap();
 ///
 /// assert_eq!(result, "id: 1\nevent: example\ndata: hello, world\n\n");
 /// ```
 /// [`tokio::io::AsyncWrite`]: ../tokio/io/trait.AsyncWrite.html
-#[derive(Debug, PartialEq, Eq)]
-pub struct SseEncoder {}
+#[derive(Debug, Clone, PartialEq)]
+pub struct SseEncoder {
+    last_id: String,
+}
+
 impl SseEncoder {
     /// Creates a new [`SseEncoder`]
     pub fn new() -> Self {
-        Self {}
+        Self {
+            last_id: String::new(),
+        }
     }
 }
 
@@ -46,53 +53,48 @@ impl Default for SseEncoder {
     }
 }
 
-#[derive(Error, Diagnostic, Debug)]
-/// Error returned by [`SseEncoder::encode`]
-pub enum SseEncodeError {
-    /// An i/o error occurred while writing the destination
-    #[error("i/o error while writing stream")]
-    Io(#[from] std::io::Error),
-    /// The data of an event contained invalid utf-8
-    #[error("invalid utf-8")]
-    Utf8(#[from] DecodeUtf8Error),
-}
-
-impl Encoder<&Frame<String>> for SseEncoder {
+impl<T> Encoder<Frame<T>> for SseEncoder
+where
+    T: AsRef<[u8]>,
+{
     type Error = SseEncodeError;
-    #[instrument(skip(dst), err)]
-    fn encode(&mut self, item: &Frame<String>, dst: &mut BytesMut) -> Result<(), SseEncodeError> {
+    #[instrument(level = "debug", skip(self, item, dst), err)]
+    fn encode(&mut self, item: Frame<T>, dst: &mut BytesMut) -> Result<(), Self::Error> {
         match item {
             Frame::Comment(comment) => {
-                // we may overallocate a little bit here for multi-line comments
-                // but that's fine, the buffer gets re-used
-                let line_count = comment.lines().count();
-                let count = ((b": \n".len()) * std::cmp::min(line_count, 1)) + comment.len();
-                dst.reserve(count);
-                for line in comment.lines() {
+                // optimized for single line comments
+                dst.reserve(comment.as_ref().len() + 1);
+                let lines = comment.as_ref().split(|b| b == &b'\n');
+                for line in lines {
                     dst.extend_from_slice(b": ");
-                    dst.extend_from_slice(line.as_bytes());
+                    dst.extend_from_slice(line);
                     dst.extend_from_slice(b"\n");
                 }
             }
-            Frame::Event(Event {
-                ref id,
-                ref name,
-                ref data,
-            }) => {
+            Frame::Event(Event { id, name, data }) => {
+                let id = match id {
+                    Some(value) => {
+                        if value != self.last_id {
+                            self.last_id = value.into_owned();
+                        }
+                        &self.last_id
+                    }
+                    None => &self.last_id,
+                };
                 let count = {
                     let mut count = 0usize;
-                    count += id.as_ref().map_or(0, |id| b"id: \n".len() + id.len());
+                    if !id.is_empty() {
+                        count += b"id: \n".len() + id.len();
+                    }
                     count += name.len() + b"event: \n".len();
-                    let line_count = data.lines().count();
-                    count += (b"data: \n".len()) * std::cmp::min(line_count, 1);
-                    count += data.len();
+                    count += (b"data: \n".len()) + data.as_ref().len();
                     count += 2; // \n\n
                     count
                 };
 
                 dst.reserve(count);
 
-                if let Some(id) = id {
+                if !id.is_empty() {
                     dst.extend_from_slice(b"id: ");
                     dst.extend_from_slice(id.as_bytes());
                     dst.extend_from_slice(b"\n");
@@ -101,10 +103,10 @@ impl Encoder<&Frame<String>> for SseEncoder {
                 dst.extend_from_slice(b"event: ");
                 dst.extend_from_slice(name.as_bytes());
                 dst.extend_from_slice(b"\n");
-
-                for data in data.lines() {
+                let lines = data.as_ref().split(|b| b == &b'\n');
+                for data in lines {
                     dst.extend_from_slice(b"data: ");
-                    dst.put(data.as_bytes());
+                    dst.put(data);
                     dst.extend_from_slice(b"\n");
                 }
 
@@ -121,5 +123,105 @@ impl Encoder<&Frame<String>> for SseEncoder {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Error, Diagnostic, Debug)]
+/// Error returned by [`SseEncoder::encode`]
+pub enum SseEncodeError {
+    /// An i/o error occurred while writing the destination
+    #[error("i/o error while writing stream")]
+    Io(#[from] std::io::Error),
+    /// The data of an event contained invalid utf-8. Not used today but might be used in the future
+    #[error("invalid utf-8")]
+    Utf8(#[from] DecodeUtf8Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn named_event() {
+        let event = Frame::<String>::Event(Event {
+            id: Some("1".into()),
+            name: "example".into(),
+            data: "hello, world".into(),
+        });
+        let mut buf = BytesMut::new();
+        let mut encoder = SseEncoder::new();
+        encoder.encode(event, &mut buf).unwrap();
+        let result = String::from_utf8(buf.to_vec()).unwrap();
+        assert_eq!(result, "id: 1\nevent: example\ndata: hello, world\n\n");
+    }
+    #[test]
+    fn id_is_sticky() {
+        let event = Frame::<String>::Event(Event {
+            id: Some("1".into()),
+            name: "example".into(),
+            data: "hello, world".into(),
+        });
+        let mut buf = BytesMut::new();
+        let mut encoder = SseEncoder::new();
+        encoder.encode(event, &mut buf).unwrap();
+        let event = Frame::<String>::Event(Event {
+            id: None,
+            name: "example".into(),
+            data: "hello, world".into(),
+        });
+        encoder.encode(event, &mut buf).unwrap();
+        let result = String::from_utf8(buf.to_vec()).unwrap();
+        assert_eq!(result, "id: 1\nevent: example\ndata: hello, world\n\nid: 1\nevent: example\ndata: hello, world\n\n");
+    }
+    #[test]
+    fn comments() {
+        let event = Frame::<String>::Comment("hello, world".into());
+        let mut buf = BytesMut::new();
+        let mut encoder = SseEncoder::new();
+        encoder.encode(event, &mut buf).unwrap();
+        let result = String::from_utf8(buf.to_vec()).unwrap();
+        assert_eq!(result, ": hello, world\n");
+    }
+    #[test]
+    fn multi_line_comment() {
+        let event = Frame::<String>::Comment("hello, world\nthis is a test".into());
+        let mut buf = BytesMut::new();
+        let mut encoder = SseEncoder::new();
+        encoder.encode(event, &mut buf).unwrap();
+        let result = String::from_utf8(buf.to_vec()).unwrap();
+        assert_eq!(result, ": hello, world\n: this is a test\n");
+    }
+    #[test]
+    fn retry() {
+        let event = Frame::<String>::Retry(std::time::Duration::from_secs(1));
+        let mut buf = BytesMut::new();
+        let mut encoder = SseEncoder::new();
+        encoder.encode(event, &mut buf).unwrap();
+        let result = String::from_utf8(buf.to_vec()).unwrap();
+        assert_eq!(result, "retry: 1000\n");
+    }
+    #[test]
+    fn retry_overflow() {
+        let event = Frame::<String>::Retry(std::time::Duration::from_secs(u64::MAX));
+        let mut buf = BytesMut::new();
+        let mut encoder = SseEncoder::new();
+        encoder.encode(event, &mut buf).unwrap();
+        let result = String::from_utf8(buf.to_vec()).unwrap();
+        assert_eq!(result, "retry: 18446744073709551615000\n");
+    }
+    #[test]
+    fn data_multiline() {
+        let event = Frame::<String>::Event(Event {
+            id: Some("1".into()),
+            name: "example".into(),
+            data: "hello, world\nthis is a test".into(),
+        });
+        let mut buf = BytesMut::new();
+        let mut encoder = SseEncoder::new();
+        encoder.encode(event, &mut buf).unwrap();
+        let result = String::from_utf8(buf.to_vec()).unwrap();
+        assert_eq!(
+            result,
+            "id: 1\nevent: example\ndata: hello, world\ndata: this is a test\n\n"
+        );
     }
 }

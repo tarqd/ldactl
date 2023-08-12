@@ -1,24 +1,20 @@
 #![deny(missing_docs)]
-#![deny(warnings)]
-use std::{borrow::Cow, convert::Infallible, marker::PhantomData};
-
-use crate::{
-    decoder_impl::SseDecoderImpl, errors::SseDecodeError, BytesStr, DecodeUtf8Error, Event, Frame,
-};
-
+#![allow(warnings)]
+use crate::{decoder_impl::SseDecoderImpl, errors::SseDecodeError, Frame, TryIntoFrame};
 use bytes::{Bytes, BytesMut};
+use std::{borrow::Cow, marker::PhantomData};
 use tokio_util::codec::Decoder;
 
 /// Decodes bytes from an SSE Stream into [`Frame<T>`]
 ///  
-/// The `T` type parameter represents the type used to store event and comment data in the [`Frame<T>`].
-/// `Frame<T>` must implement [`TryFromBytesFrame`] which allows you to convert from `Frame<Bytes>` to `Frame<T>`.
+/// The `T` type parameter represents the type used to store event and comment data in [`Frame<T>`].
+///
 ///
 /// There are 4 default implementations:
 /// - `Frame<String>`: This is the default type used by [`SseDecoder`]. Easy to use, but may copy if the underlying buffer is still shared.
 /// - `Frame<Cow<'static, str>>`: Effectively the same as `Frame<String>` but will avoid allocating for common event types (right now just `message`) and empty comments/events
 /// - `Frame<Bytes>`: Returns a zero-copy slice of the underlying buffer. UTF-8 validity is not checked. This is cheaply cloneable but maintains a reference the underlying shared vector. Use it and drop it quickly to avoid wasting memory`
-/// - `Frame<BytesStr>`: A zero-copy string slice. Same as `FrameBytes` but validates UTF-8 and implements `Deref<str>` for convienence.
+/// - `Frame<BytesStr>`: A zero-copy "string" reference backed by bytes. Same as `FrameBytes` but validates UTF-8 and implements `Deref<str>` for convienence.
 ///
 /// ## Quick Links
 /// - [`SseDecodeError`]: Type for unrecoverable decoder errors
@@ -60,6 +56,8 @@ use tokio_util::codec::Decoder;
 /// ```
 /// [`AsyncRead`]: ../tokio/io/trait.AsyncWrite.html
 /// [`Frame<T>`]: crate::Frame
+/// [`BytesStr`]: crate::BytesStr
+/// [`TryFromBytesFrame`]: crate::TryFromBytesFrame
 
 pub struct SseDecoder<T = String> {
     inner: SseDecoderImpl,
@@ -80,9 +78,10 @@ impl<T> SseDecoder<T> {
     ///
     /// Setting a buffer size limit is highly recommended for any `SSECodec` which
     /// will be exposed to untrusted input. Otherwise, the size of the buffer
-    /// that holds the line currently being read is unbounded. An attacker could
-    /// exploit this unbounded buffer by sending an unbounded amount of input
-    /// without any `\n` characters, causing unbounded memory consumption.
+    /// that holds event currently being read is unbounded. An attacker could
+    /// exploit this unbounded buffer by sending unbounded event names, ids or data fields
+    /// , causing unbounded memory consumption.
+    ///
     ///
     /// [`SSEDecodeError`]: crate::decoder::SSEDecodeError
     pub fn new() -> Self {
@@ -166,84 +165,6 @@ impl<T> SseDecoder<T> {
     }
 }
 
-mod sealed {
-
-    pub trait SseFrame {
-        type Data;
-    }
-    impl<T> SseFrame for crate::Frame<T> {
-        type Data = T;
-    }
-}
-
-pub trait TryFromBytesFrame
-where
-    Self: sealed::SseFrame + Sized,
-{
-    type Error;
-
-    fn try_from_frame(
-        frame: Frame<Bytes>,
-    ) -> Result<Frame<<Self as sealed::SseFrame>::Data>, Self::Error>;
-}
-
-impl TryFromBytesFrame for Frame<String> {
-    type Error = SseDecodeError;
-    fn try_from_frame(frame: Frame<Bytes>) -> Result<Self, Self::Error> {
-        match frame {
-            Frame::Event(Event { id, name, data }) => Ok(Frame::Event(Event {
-                id,
-                name,
-                data: String::from_utf8(data.to_vec())?,
-            })),
-            Frame::Retry(duration) => Ok(Frame::Retry(duration)),
-            Frame::Comment(comment) => Ok(Frame::Comment(String::from_utf8(comment.to_vec())?)),
-        }
-    }
-}
-
-impl TryFromBytesFrame for Frame<BytesStr> {
-    type Error = DecodeUtf8Error;
-    fn try_from_frame(frame: Frame<Bytes>) -> Result<Self, Self::Error> {
-        match frame {
-            Frame::Event(Event { id, name, data }) => Ok(Frame::Event(Event {
-                id,
-                name,
-                data: BytesStr::try_from_utf8_bytes(data)?,
-            })),
-            Frame::Retry(duration) => Ok(Frame::Retry(duration)),
-            Frame::Comment(comment) => Ok(Frame::Comment(BytesStr::try_from_utf8_bytes(comment)?)),
-        }
-    }
-}
-impl TryFromBytesFrame for Frame<Bytes> {
-    type Error = Infallible;
-    fn try_from_frame(frame: Frame<Bytes>) -> Result<Self, Self::Error> {
-        Ok(frame)
-    }
-}
-pub trait TryIntoFrame<T>
-where
-    T: sealed::SseFrame,
-{
-    type Error;
-    fn try_into_frame(self) -> Result<Frame<T::Data>, Self::Error>;
-}
-
-impl<T> TryIntoFrame<T> for Frame<Bytes>
-where
-    T: sealed::SseFrame + TryFromBytesFrame,
-{
-    type Error = <T as TryFromBytesFrame>::Error;
-    fn try_into_frame(self) -> Result<Frame<T::Data>, Self::Error> {
-        T::try_from_frame(self)
-    }
-}
-impl From<Infallible> for SseDecodeError {
-    fn from(_: Infallible) -> Self {
-        unreachable!()
-    }
-}
 impl<T> Decoder for SseDecoder<T>
 where
     Frame<Bytes>: TryIntoFrame<Frame<T>>,
@@ -278,26 +199,20 @@ impl<T> Default for SseDecoder<T> {
 #[cfg(test)]
 mod test {
 
+    use crate::{Event, TryFromBytesFrame};
+
     use super::*;
-    use futures::StreamExt;
+    //use futures::StreamExt;
     use tokio_util::codec::FramedRead;
     type SseDecoder = super::SseDecoder<Bytes>;
+    use bytes::{BufMut, BytesMut};
+
     #[test]
-    fn try_from_frame() {
-        let byte_frame = Frame::<Bytes>::Event(Event {
-            id: Some("1".into()),
-            name: "foo".into(),
-            data: Bytes::from_static(b"bar"),
-        });
-        let _test = Bytes::from_static(b"foo");
-        let _my_frame = Frame::<String>::try_from_frame(byte_frame).unwrap();
-    }
-    #[tokio::test]
-    async fn test_event() {
-        let bytes = b"event: foo\ndata: bar\n\n";
-        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
-        let event = framed.next().await.unwrap().unwrap();
-        let decoder = framed.decoder();
+    fn test_event() {
+        let mut bytes = BytesMut::from(b"event: foo\ndata: bar\n\n".as_ref());
+        let mut decoder = SseDecoder::default();
+        let event = decoder.decode(&mut bytes).unwrap().unwrap();
+
         // should reset after event dispatch
         assert_eq!(decoder.current_event_type(), "message");
         assert_eq!(
@@ -309,45 +224,49 @@ mod test {
             })
         );
     }
-    #[tokio::test]
-    async fn test_current_event_type() {
-        let bytes = b"event: foo\ndata: bar\nevent: baz\n";
-        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
-        let _ = framed.next().await;
-        let decoder = framed.decoder();
+    #[test]
+    fn test_current_event_type() {
+        let mut bytes = BytesMut::from(b"event: foo\ndata: bar\nevent: baz\n".as_ref());
+        let mut decoder = SseDecoder::default();
+        let _ = decoder.decode(&mut bytes);
 
         assert_eq!(decoder.current_event_type(), "baz");
     }
-    #[tokio::test]
-    async fn test_event_retry() {
-        let bytes = b"retry: 100\n";
-        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
-        let event = framed.next().await.unwrap().unwrap();
+
+    #[test]
+    fn test_event_retry() {
+        let mut bytes = BytesMut::from(b"retry: 100\n".as_ref());
+        let mut decoder = SseDecoder::default();
+        let event = decoder.decode(&mut bytes).unwrap().unwrap();
 
         assert_eq!(event, Frame::Retry(std::time::Duration::from_millis(100)));
     }
-    #[tokio::test]
-    async fn test_event_retry_invalid() {
-        let bytes = b"retry: foo\n";
-        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
-        let event = framed.next().await;
+    #[test]
+    fn test_event_retry_invalid() {
+        let mut bytes = BytesMut::from(b"retry: foo\n".as_ref());
+        let mut decoder = SseDecoder::default();
+        let event = decoder.decode(&mut bytes).unwrap();
 
         assert!(event.is_none());
     }
-    #[tokio::test]
-    async fn event_has_id() {
-        let bytes = b"id: 1\nevent: foo\ndata: bar\n\n";
-        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
-        let event = framed.next().await.unwrap().unwrap();
-        let _decoder = framed.decoder();
+
+    #[test]
+    fn event_has_id() {
+        let mut bytes = BytesMut::from(b"id: 1\nevent: foo\ndata: bar\n\n".as_ref());
+        let mut decoder = SseDecoder::default();
+        let event = decoder.decode(&mut bytes).unwrap().unwrap();
 
         assert!(matches!(event, Frame::Event(Event { id: Some(v), .. }) if v.as_bytes() == b"1"));
     }
-    #[tokio::test]
-    async fn require_new_line() {
-        let bytes = b"event: foo\ndata: bar";
-        let mut framed = FramedRead::new(&bytes[..], SseDecoder::default());
-        let event = framed.next().await.unwrap();
+    #[test]
+    fn require_blank_line() {
+        let mut bytes = BytesMut::from(b"event: foo\ndata: bar".as_ref());
+        let mut decoder = SseDecoder::default();
+        let event = decoder.decode(&mut bytes);
+        assert!(matches!(event, Ok(None)));
+        bytes.put_u8(b'\n');
+        // should error if we reported this the last write
+        let event = decoder.decode_eof(&mut bytes);
         assert!(matches!(event, Err(SseDecodeError::UnexpectedEof)));
     }
 }
