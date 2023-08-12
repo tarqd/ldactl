@@ -1,6 +1,6 @@
 [package]
 name = "tokio_sse_codec"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Tokio codec for Server-Sent Events"
 license = "MIT"
