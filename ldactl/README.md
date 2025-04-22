@@ -36,8 +36,8 @@ Options:
 
 #### Executing `jq`
 
-![executing jq](./assets/hook-screenshot.png)
+![executing jq](../assets/hook-screenshot.png)
 
 #### Writing to a file
 
-![writing to file](./assets/file-screenshot.png)
+![writing to file](../assets/file-screenshot.png)
