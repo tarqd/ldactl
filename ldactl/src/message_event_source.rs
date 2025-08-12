@@ -4,7 +4,7 @@ use crate::messages::{DeleteEvent, Message, PatchEvent, PutEvent};
 use miette::Diagnostic;
 use thiserror::Error;
 use tokio_sse_codec::{ Event};
-use tracing::{error_span, instrument, Instrument};
+use tracing::{debug, error_span, instrument, Instrument};
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum MessageParseError {
@@ -23,6 +23,7 @@ impl TryFrom<Event<String>> for Message {
     type Error = MessageParseError;
     #[instrument(level = "debug", fields(event_name=%event.name))]
     fn try_from(event: Event<String>) -> Result<Self, Self::Error> {
+        debug!(event_name=%event.name, "parsing event %s",);
         match event.name.deref() {
             "put" => Ok(Message::Put(
                 serde_json::from_str(&event.data)

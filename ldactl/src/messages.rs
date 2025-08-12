@@ -121,10 +121,21 @@ pub struct Expirable<T> {
     expiring: Option<Expiring<T>>,
 }
 
+impl<T> Expirable<T> {
+    /// Returns a reference to the current value
+    pub fn current(&self) -> &T {
+        &self.current
+    }
+    pub fn expiring(&self) -> Option<&Expiring<T>> {
+        self.expiring.as_ref()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Expiring<T> {
     value: T,
+    #[serde(rename = "timestamp")]
     expires_at: UnixTimestamp,
 }
 
@@ -191,5 +202,17 @@ mod tests {
         let result = super::serialize_env_id_path(&ClientSideId::try_from(env).unwrap(), &mut se);
         assert!(result.is_ok());
         assert_eq!(String::from_utf8(w.into_inner().unwrap()).unwrap(), path);
+    }
+    #[test]
+    fn test_deserialize_expirable() {
+        let data = "{\"expiring\":{\"timestamp\":1755066630894,\"value\":\"sdk-old\"},\"value\":\"sdk-new\"}";
+        let ret = serde_json::from_str::<Expirable<String>>(data);
+        assert!(ret.is_ok(), "{:?}", ret);
+        let exp = ret.unwrap();
+        assert_eq!(exp.current(), &"sdk-new");
+        assert_eq!(exp.expiring(), Some(&Expiring {
+            value: "sdk-old".to_string(),
+            expires_at: 1755066630894,
+        }));
     }
 }
