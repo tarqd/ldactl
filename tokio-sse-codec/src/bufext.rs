@@ -7,6 +7,8 @@ pub(crate) trait BufExt: Buf {
     fn bump(&mut self);
     fn bump_if(&mut self, byte: u8);
     fn find_byte(&self, byte: u8) -> Option<usize>;
+    // allow unused
+    #[allow(unused)]
     fn strip_utf8_bom(&mut self);
 }
 pub(crate) trait BufMutExt: Buf {

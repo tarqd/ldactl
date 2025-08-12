@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use sse_codec::BytesStr;
+
 use tokio_sse_codec::{self as sse_codec, Event};
 
 use super::sse_backoff::{MinimumBackoffDuration, WithMinimumBackoff};
@@ -58,7 +58,7 @@ pub struct EventSource {
     #[pin]
     pub(super) state: EventSourceState,
     pub(super) retry_attempts: usize,
-    pub(super) last_event_id: Option<BytesStr>,
+    pub(super) last_event_id: Option<String>,
     pub(super) read_timeout: Duration,
     pub(super) retry_url: Arc<Mutex<Option<reqwest::Url>>>,
     pub(super) is_retrying: bool,
@@ -66,11 +66,11 @@ pub struct EventSource {
 
 impl EventSource {
    
-   pub fn new(url: Url, last_event_id: Option<BytesStr>) -> Self {
+   pub fn new(url: Url, last_event_id: Option<String>) -> Self {
     super::EventSourceBuilder::new(url).last_event(last_event_id).build().unwrap()
    }
     
-    pub fn last_event_id(&self) -> Option<BytesStr> {
+    pub fn last_event_id(&self) -> Option<String> {
         self.last_event_id.clone()
     }
 
@@ -133,7 +133,7 @@ impl EventSource {
             backoff: b.with_minimum_duration(Duration::ZERO),
             state: EventSourceState::Initial,
             retry_attempts: 0,
-            last_event_id: last_event_id.map(BytesStr::from),
+            last_event_id: last_event_id.map(|s| s.into()),
             read_timeout: Duration::from_secs(5 * 60),
             retry_url: url,
             is_retrying: false
@@ -166,7 +166,7 @@ impl EventSource {
         };
 
         if let Some(last_event_id) = &self.last_event_id {
-            trace!("setting last-event-id header to {}", last_event_id);
+            trace!("setting last-event-id header to {}", last_event_id.deref());
             
             builder = builder.header("last-event-id", last_event_id.deref());
         }
@@ -211,7 +211,7 @@ impl EventSource {
             .into_async_read()
             .compat();
 
-        let framed_read = FramedRead::new(inner, sse_codec::SseDecoder::new())
+        let framed_read = FramedRead::new(inner, sse_codec::SseDecoder::<String>::new())
             .map_err(|e| EventSourceError::DecodeError(e))
             .in_current_span()
             .boxed();
@@ -279,7 +279,7 @@ impl TryFrom<RequestBuilder> for EventSource {
 }
 
 impl Stream for EventSource {
-    type Item = Result<Event<BytesStr>, EventSourceError>;
+    type Item = Result<Event<String>, EventSourceError>;
 
     fn poll_next(
         mut self: Pin<&mut Self>,
@@ -342,8 +342,8 @@ impl Stream for EventSource {
                                     debug_span!("read_frame::event", name=event.name.deref(), id=?event.id, data_len=event.data.len())
                                         .entered();
                                 debug!("received event");
-                                if event.id.is_some() && event.id != *this.last_event_id {
-                                    *this.last_event_id = event.id.clone()
+                                if let Some(id) = event.id.as_ref() {
+                                    *this.last_event_id = Some(id.to_string());
                                 }
 
                                 Ready(Some(Ok(event)))
