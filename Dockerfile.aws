@@ -1,0 +1,29 @@
+# Build ldactl (Rust) for release
+FROM rust:1.84.1-slim AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/ldactl
+COPY . .
+RUN cargo install --path ldactl
+
+# Runtime image
+FROM debian:bookworm-slim
+
+
+RUN apt-get update && apt-get install -y \
+    bash \
+    awscli \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the built binary from the builder stage
+COPY --from=builder /usr/local/cargo/bin/ldactl /usr/local/bin/ldactl
+COPY hooks/write-aws-ssm.sh /hooks/write-aws-ssm.sh
+
+# ldactl reads the key from env: LD_RELAY_AUTO_CONFIG_KEY
+ENTRYPOINT ["/usr/local/bin/ldactl"]
+CMD ["--exec", "/hooks/write-aws-ssm.sh"]

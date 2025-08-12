@@ -126,7 +126,23 @@ async fn main() -> Result<(), miette::Report> {
                         _ => {
                             if let Some(cmd) = args.exec.as_ref() {
                                 let exec_args = args.exec_args.clone().unwrap_or_default();
-                                let _ = execute_hook(cmd.clone(), exec_args, change, args.exec_mode.clone()).await;
+                                match execute_hook(cmd.clone(), exec_args, change, args.exec_mode.clone()).await {
+                                    Ok(Ok(exit_status)) => {
+                                        if !exit_status.success() {
+                                            tracing::error!(?exit_status, "hook command failed");
+                                        } else {
+                                            tracing::debug!(?exit_status, "hook command succeeded");
+                                        }
+                                    }
+                                    Ok(Err(e)) => {
+                                        tracing::error!(?e, "hook command failed");
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(?e, "hook command failed");
+                                    }
+                                }
+                                
+                                
                             }
                         }
                     }
@@ -155,11 +171,11 @@ fn execute_hook(
     args: Vec<String>,
     change_event: ConfigChangeEvent,
     exec_mode: ExecMode,
-) -> JoinHandle<Result<(), miette::Report>> {
+) -> JoinHandle<Result<std::process::ExitStatus, miette::Report>> {
     // TODO: Use tokio to spawn instead
     // we should also wrap the output in tracing
     let span = Span::current();
-    tokio::task::spawn_blocking(move || -> Result<(), miette::Report> {
+    return tokio::task::spawn_blocking(move || -> Result<std::process::ExitStatus, miette::Report> {
         let _span = span.enter();
         let mut cmd = std::process::Command::new(cmd);
         cmd.args(args);
@@ -203,11 +219,12 @@ fn execute_hook(
             }
         }
         
-        child
+        let exit_status = child
             .wait()
             .into_diagnostic()
             .context("hook command failed")?;
-        Ok(())
+        debug!(?exit_status, "hook command exited");
+        return Ok(exit_status);
     })
 }
 
