@@ -71,13 +71,26 @@ Options:
 
 ## Integrating with Cloud Providers and Secrets Managers
 
-Example scripts can be found in the `hooks/` directory.
+Example scripts can be found in the `hooks/` directory. See [docs/HOOKS.md](./docs/HOOKS.md) for detailed documentation of all available hooks and [docs/CUSTOM_HOOKS.md](./docs/CUSTOM_HOOKS.md) for writing your own hooks.
 
-### AWS SSM
+### Configuring LD Relay
 
+You can use the `write-ld-relay-config.sh` and `write-ld-relay-env.sh` hooks to write configuration files for LD Relay. Here's an example of using the config file and restarting relay in a custom hook:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Execute the base hook
+LD_OUTPUT_FILE=/etc/ldrelay/envs.conf ENV_DATASTORE_PREFIX="ld:\$CID" ./hooks/write-ld-relay-config.sh
+# Merge with base config
+cat /etc/ldrelay/base.conf /etc/ldrelay/envs.conf > /etc/ldrelay/relay.conf
+
+# restart relay
+systemctl restart ld-relay
 ```
-ldactl --exec /hooks/write-aws-ssm.sh
-```
+
+Run this with `ldactl --exec /path/to/config-and-restart-ld-relay.sh` 
 
 #### Docker
 
