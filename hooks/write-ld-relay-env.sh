@@ -57,13 +57,7 @@ write_env_vars() {
     local proj_var_prefix="LD_PROJ_KEY_${project_safe}_${env_key_safe}"
     
     if [[ "$action" == "delete" ]]; then
-        # For delete events, write empty values
-        echo "${env_var_prefix}="
-        echo "${mobile_var_prefix}="
-        echo "${client_var_prefix}="
-        echo "${table_var_prefix}="
-        echo "${prefix_var_prefix}="
-        echo "${proj_var_prefix}="
+        # for delete do not write
     else
         # For insert/update events, write actual values
         
