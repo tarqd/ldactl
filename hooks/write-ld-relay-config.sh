@@ -51,13 +51,8 @@ write_config() {
     local env_name="${project_safe}_${env_key_safe}"
     
     if [[ "$action" == "delete" ]]; then
-        # For delete events, write empty environment section
-        echo "[environment \"${env_name}\"]"
-        echo "sdkKey = \"\""
-        echo "mobileKey = \"\""
-        echo "envId = \"\""
-        echo "prefix = \"\""
-        echo "tableName = \"\""
+        # For delete events, write nothing
+        
     else
         # For insert/update events, write actual values
         
