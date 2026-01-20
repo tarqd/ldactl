@@ -17,6 +17,22 @@ This document describes the available hooks for LDACTL (LaunchDarkly AutoConfig 
 
 **Requirements**: AWS CLI configured with appropriate permissions
 
+### provision-dynamodb-table.sh
+**Purpose**: Provisions a DynamoDB table for each LaunchDarkly environment if it does not exist
+**Method**: AWS CLI (`aws dynamodb`)
+**Configuration**:
+- `TABLE_NAME_PREFIX` (default: `ld-`) - Prefix for table name (combined with client-side ID)
+- `BILLING_MODE` (default: `PAY_PER_REQUEST`) - DynamoDB billing mode (`PAY_PER_REQUEST` or `PROVISIONED`)
+- `READ_CAPACITY` (default: `5`) - Read capacity units (only used if `BILLING_MODE=PROVISIONED`)
+- `WRITE_CAPACITY` (default: `5`) - Write capacity units (only used if `BILLING_MODE=PROVISIONED`)
+- `AWS_REGION` (optional) - AWS region (defaults to AWS CLI configured region)
+- `DELETE_TABLE` (default: `0`) - Set to `1` to delete table on delete events (disabled by default for safety)
+- `TABLE_TAGS` (optional) - JSON string of tags to apply to table (e.g., `[{"Key":"Environment","Value":"Production"}]`)
+
+**Table Schema**: Creates table with name `ld-{clientsideid}` with partition key `namespace` (String) and sort key `key` (String) as required by LaunchDarkly SDK
+
+**Requirements**: AWS CLI configured with DynamoDB permissions (CreateTable, DescribeTable, TagResource, optionally DeleteTable)
+
 ### write-gcp-secrets.sh
 **Purpose**: Stores LaunchDarkly SDK credentials in Google Cloud Secret Manager  
 **Method**: Google Cloud CLI (`gcloud secrets`)  
