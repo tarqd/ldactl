@@ -90,7 +90,26 @@ cat /etc/ldrelay/base.conf /etc/ldrelay/envs.conf > /etc/ldrelay/relay.conf
 systemctl restart ld-relay
 ```
 
-Run this with `ldactl --exec /path/to/config-and-restart-ld-relay.sh` 
+Run this with `ldactl --exec /path/to/config-and-restart-ld-relay.sh`
+
+### Provisioning DynamoDB Tables
+
+The `provision-dynamodb-table.sh` hook automatically provisions DynamoDB tables for each LaunchDarkly environment with the required schema (partition key: `namespace`, sort key: `key`). This is useful when using the LaunchDarkly SDK's DynamoDB integration.
+
+```bash
+# Basic usage with on-demand billing (recommended)
+ldactl --exec ./hooks/provision-dynamodb-table.sh
+
+# With custom table prefix and provisioned capacity
+TABLE_NAME_PREFIX="launchdarkly-" BILLING_MODE=PROVISIONED READ_CAPACITY=10 WRITE_CAPACITY=10 \
+  ldactl --exec ./hooks/provision-dynamodb-table.sh
+
+# With tags and specific region
+TABLE_TAGS='[{"Key":"Team","Value":"Platform"},{"Key":"ManagedBy","Value":"ldactl"}]' AWS_REGION=us-west-2 \
+  ldactl --exec ./hooks/provision-dynamodb-table.sh
+```
+
+The table name will be in the format `ld-{clientsideid}` by default. The hook will check if the table exists before creating it, making it safe to run repeatedly.
 
 #### Docker
 
